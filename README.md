@@ -7,8 +7,6 @@ Self-hosted media downloader with a Flask UI for batching links, choosing format
 ![Python](https://img.shields.io/badge/python-3.10+-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
-![ClipHarbor MP3 mode preview](assets/preview-mp3.png)
-
 ## Features
 
 - Download media from 1000+ supported sites through [yt-dlp](https://github.com/yt-dlp/yt-dlp)

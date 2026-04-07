@@ -32,6 +32,3 @@ Thumbs.db
 # Logs & temp
 *.log
 .clipharbor-cache/
-
-# Media samples (large)
-assets/*.mov
