@@ -69,6 +69,44 @@ def yt_dlp_cookies_configured() -> bool:
     return bool((os.environ.get("YT_DLP_COOKIES_B64") or "").strip())
 
 
+MAX_COOKIES_BODY_BYTES = 256 * 1024
+
+
+def looks_like_netscape_cookies(text: str) -> bool:
+    if len(text) < 24:
+        return False
+    low = text.lower()
+    if "youtube.com" in low or "youtu.be" in low:
+        return True
+    if "\t" in text and ("true" in low or "false" in low):
+        return True
+    if "netscape" in low:
+        return True
+    return False
+
+
+def parse_request_cookies(payload: dict) -> tuple[str | None, str | None]:
+    """Returns (error_message_or_none, stripped_cookie_text_or_none)."""
+    raw = payload.get("cookies_netscape")
+    if raw is None or raw == "":
+        return None, None
+    if not isinstance(raw, str):
+        return "cookies_netscape must be a string.", None
+    s = raw.strip()
+    if not s:
+        return None, None
+    data = s.encode("utf-8")
+    if len(data) > MAX_COOKIES_BODY_BYTES:
+        return "cookies_netscape is too large (max 256KB).", None
+    if not looks_like_netscape_cookies(s):
+        return (
+            "Unrecognized cookie file format. Export Netscape cookies for youtube.com "
+            "(see yt-dlp wiki: exporting YouTube cookies).",
+            None,
+        )
+    return None, s
+
+
 def yt_dlp_command(media_url: str, *args, cookies_path: str | None = None):
     cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist"]
     if cookies_path:
@@ -81,35 +119,47 @@ def yt_dlp_command(media_url: str, *args, cookies_path: str | None = None):
 
 
 @contextmanager
-def yt_dlp_cookies_context():
-    """Netscape-format cookies for yt-dlp (needed for many YouTube URLs). See .env.example."""
-    path = (os.environ.get("YT_DLP_COOKIES_FILE") or os.environ.get("YT_DLP_COOKIES_PATH") or "").strip()
-    if path and Path(path).is_file():
-        yield path
-        return
-
-    b64 = (os.environ.get("YT_DLP_COOKIES_B64") or "").strip()
-    if not b64:
-        yield None
-        return
-
+def yt_dlp_cookies_context(request_cookies: str | None = None):
+    """Cookies for yt-dlp: per-request paste (user's export) overrides server env. See .env.example."""
+    tmp_to_unlink: list[str] = []
     try:
-        raw = base64.b64decode(b64)
-    except (ValueError, binascii.Error):
-        logger.warning("YT_DLP_COOKIES_B64 is not valid base64; ignoring.")
-        yield None
-        return
+        req = (request_cookies or "").strip()
+        if req:
+            fd, tmp = tempfile.mkstemp(prefix="yt-req-cookies-", suffix=".txt")
+            tmp_to_unlink.append(tmp)
+            with os.fdopen(fd, "wb") as fh:
+                fh.write(req.encode("utf-8"))
+            yield tmp
+            return
 
-    fd, tmp = tempfile.mkstemp(prefix="yt-cookies-", suffix=".txt")
-    try:
+        path = (os.environ.get("YT_DLP_COOKIES_FILE") or os.environ.get("YT_DLP_COOKIES_PATH") or "").strip()
+        if path and Path(path).is_file():
+            yield path
+            return
+
+        b64 = (os.environ.get("YT_DLP_COOKIES_B64") or "").strip()
+        if not b64:
+            yield None
+            return
+
+        try:
+            raw = base64.b64decode(b64)
+        except (ValueError, binascii.Error):
+            logger.warning("YT_DLP_COOKIES_B64 is not valid base64; ignoring.")
+            yield None
+            return
+
+        fd, tmp = tempfile.mkstemp(prefix="yt-cookies-", suffix=".txt")
+        tmp_to_unlink.append(tmp)
         with os.fdopen(fd, "wb") as fh:
             fh.write(raw)
         yield tmp
     finally:
-        try:
-            os.unlink(tmp)
-        except OSError:
-            pass
+        for p in tmp_to_unlink:
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
 
 
 def get_ffmpeg_location() -> str:
@@ -140,11 +190,10 @@ def ytdlp_error_message(stderr: str | None, media_url: str = "") -> str:
     if is_youtube_url(media_url):
         parts.append(
             "YouTube often blocks anonymous downloads from cloud/datacenter IPs. "
-            "There is no stable free workaround that never breaks and uses nothing of yours—"
-            "that is intentional on YouTube's side. "
-            "To avoid putting your cookies on a server: run ClipHarbor on your home PC "
-            "(residential IP); yt-dlp frequently works there with no extra setup. "
-            "For cloud hosting, cookies (they expire) or similar auth are what yt-dlp supports."
+            "Browsers never send youtube.com cookies to this site (security). "
+            "You can paste your own exported Netscape cookies in the optional field below the link box—"
+            "they are used only for that request then deleted from disk. "
+            "Or run ClipHarbor at home (residential IP) where yt-dlp often works without cookies."
         )
     elif not yt_dlp_cookies_configured():
         parts.append(
@@ -242,10 +291,14 @@ def get_info():
     if not url.startswith(("http://", "https://")):
         return jsonify({"error": "Invalid URL"}), 400
 
+    ck_err, req_cookies = parse_request_cookies(payload)
+    if ck_err:
+        return jsonify({"error": ck_err}), 400
+
     logger.info("Fetching info for: %s", url)
 
     try:
-        with yt_dlp_cookies_context() as ck:
+        with yt_dlp_cookies_context(req_cookies) as ck:
             command = yt_dlp_command(url, "-j", url, cookies_path=ck)
             result = subprocess.run(command, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
@@ -305,6 +358,10 @@ def download_media():
     if format_choice not in ("video", "audio"):
         return jsonify({"error": "Invalid format"}), 400
 
+    ck_err, req_cookies = parse_request_cookies(payload)
+    if ck_err:
+        return jsonify({"error": ck_err}), 400
+
     temp_dir = Path(tempfile.mkdtemp(prefix="clipharbor-"))
     output_template = str(temp_dir / "clipharbor.%(ext)s")
     ffmpeg_path = get_ffmpeg_location()
@@ -312,7 +369,7 @@ def download_media():
     logger.info("Downloading [%s] %s (format_id=%s)", format_choice, url, format_id)
 
     try:
-        with yt_dlp_cookies_context() as ck:
+        with yt_dlp_cookies_context(req_cookies) as ck:
             command = yt_dlp_command(url, "-o", output_template, cookies_path=ck)
             if format_choice == "audio":
                 command += ["-x", "--audio-format", "mp3", "--ffmpeg-location", ffmpeg_path]

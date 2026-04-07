@@ -67,7 +67,7 @@ YouTube is built to limit automated access from **datacenter IPs** (including Ve
 
 **Practical approach without uploading your cookies to the cloud:** run ClipHarbor **on your own computer** at home. `yt-dlp` often works on **residential** networks without extra configuration.
 
-**If you must host in the cloud:** expect failures unless you supply **cookies** (they expire; see [exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)) via `YT_DLP_COOKIES_FILE` or `YT_DLP_COOKIES_B64`.
+**If you must host in the cloud:** expect failures unless you supply **cookies** (they expire; see [exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)) via `YT_DLP_COOKIES_FILE` or `YT_DLP_COOKIES_B64`, or users paste their own Netscape `cookies.txt` into the optional field in the UI (sent as JSON field `cookies_netscape` per request; not stored).
 
 **Power users:** optional `YT_DLP_YOUTUBE_EXTRACTOR_ARGS` (e.g. `youtube:player_client=android,tv`) may help briefly until YouTube changes again—see [yt-dlp usage](https://github.com/yt-dlp/yt-dlp#usage).
 

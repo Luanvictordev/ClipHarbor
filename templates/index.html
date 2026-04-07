@@ -674,6 +674,46 @@
       margin-top: 16px;
     }
 
+    .cookies-panel {
+      margin-top: 12px;
+      border: 1px solid var(--ds-gray-200);
+      border-radius: 8px;
+      padding: 8px 12px;
+      background: var(--ds-gray-100);
+    }
+
+    .cookies-panel summary {
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--ds-gray-600);
+      user-select: none;
+    }
+
+    .cookies-panel summary:hover {
+      color: var(--ds-fg);
+    }
+
+    .cookies-help {
+      font-size: 12px;
+      color: var(--ds-gray-500);
+      margin: 10px 0 8px;
+      line-height: 1.45;
+    }
+
+    .cookies-panel textarea {
+      width: 100%;
+      min-height: 72px;
+      max-height: 160px;
+      resize: vertical;
+      font-family: var(--font-mono);
+      font-size: 11px;
+      padding: 8px;
+      border-radius: 6px;
+      border: 1px solid var(--ds-gray-200);
+      background: var(--ds-bg);
+      color: var(--ds-fg);
+    }
+
     @media (max-width: 640px) {
       .result-card {
         flex-direction: column;
@@ -767,6 +807,12 @@
             </svg>
           </button>
         </div>
+        <details class="cookies-panel">
+          <summary id="tCookiesSummary">YouTube cookies (optional)</summary>
+          <p class="cookies-help" id="tCookiesHelp"></p>
+          <textarea id="cookiesNetscape" spellcheck="false" autocomplete="off"
+            placeholder=""></textarea>
+        </details>
       </div>
 
       <div class="results-container" id="resultsMount"></div>
@@ -854,6 +900,9 @@
       en: {
         heroSub: "Drop a link to download MP4 or MP3 instantly.",
         placeholder: "Paste YouTube, TikTok, Reddit URLs...",
+        cookiesSummary: "YouTube cookies (optional)",
+        cookiesHelp: "Your browser cannot send youtube.com cookies here (security). Export a Netscape cookies.txt while logged into YouTube (see yt-dlp wiki) and paste below. Used only for your requests, then removed from the server—not stored.",
+        cookiesPh: "# Netscape / cookies.txt …",
         retry: "Retry", download: "Download", downloading: "Downloading...",
         downloadAgain: "Download Again", saved: "Saved",
         coffeeBtn: "Buy me a coffee",
@@ -865,6 +914,9 @@
       pt: {
         heroSub: "Solte um link para baixar MP4 ou MP3 instantaneamente.",
         placeholder: "Cole URLs do YouTube, TikTok, Reddit...",
+        cookiesSummary: "Cookies do YouTube (opcional)",
+        cookiesHelp: "O navegador não envia cookies do youtube.com para este site (segurança). Exporte um ficheiro Netscape cookies.txt com a sessão iniciada no YouTube (wiki do yt-dlp) e cole abaixo. Usados só nos teus pedidos e depois apagados no servidor—não ficam guardados.",
+        cookiesPh: "# Netscape / cookies.txt …",
         retry: "Repetir", download: "Baixar", downloading: "Baixando...",
         downloadAgain: "Baixar Novamente", saved: "Salvo",
         coffeeBtn: "Pague-me um café",
@@ -876,6 +928,9 @@
       es: {
         heroSub: "Suelta un enlace para descargar MP4 o MP3 al instante.",
         placeholder: "Pega URLs de YouTube, TikTok, Reddit...",
+        cookiesSummary: "Cookies de YouTube (opcional)",
+        cookiesHelp: "El navegador no envía las cookies de youtube.com a este sitio (seguridad). Exporta cookies.txt formato Netscape con sesión en YouTube (wiki de yt-dlp) y pégalo abajo. Solo se usan en tus solicitudes y luego se borran del servidor.",
+        cookiesPh: "# Netscape / cookies.txt …",
         retry: "Reintentar", download: "Descargar", downloading: "Descargando...",
         downloadAgain: "Descargar de nuevo", saved: "Guardado",
         coffeeBtn: "Cómprame un café",
@@ -903,6 +958,9 @@
 
       document.getElementById('tHeroSub').textContent = t.heroSub;
       document.getElementById('urls').placeholder = t.placeholder;
+      document.getElementById('tCookiesSummary').textContent = t.cookiesSummary;
+      document.getElementById('tCookiesHelp').textContent = t.cookiesHelp;
+      document.getElementById('cookiesNetscape').placeholder = t.cookiesPh;
       document.getElementById('tCoffeeBtn').textContent = t.coffeeBtn;
       document.getElementById('tModalTitle').textContent = t.modalTitle;
       document.getElementById('tModalText').textContent = t.modalText;
@@ -967,6 +1025,12 @@
 
     function parseUrls(text) { return [...new Set(text.split(/[,\n ]+/).map(i => i.trim()).filter(i => i.startsWith("http")))]; }
 
+    function getCookiesNetscapePayload() {
+      const el = document.getElementById("cookiesNetscape");
+      const v = (el && el.value) ? el.value.trim() : "";
+      return v.length ? v : undefined;
+    }
+
     function formatDuration(seconds) {
       if (!seconds) return "";
       const hrs = Math.floor(seconds / 3600), mins = Math.floor((seconds % 3600) / 60), secs = Math.floor(seconds % 60);
@@ -990,7 +1054,7 @@
       for (let i = startIndex; i < cardData.length; i++) {
         const url = cardData[i].url;
         try {
-          const res = await fetch("/api/info", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
+          const res = await fetch("/api/info", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url, cookies_netscape: getCookiesNetscapePayload() }) });
           const data = await res.json();
           if (!res.ok || data.error) cardData[i] = { ...cardData[i], status: "error", error: data.error || "Failed to inspect." };
           else cardData[i] = { ...cardData[i], status: "ready", title: data.title || "Untitled", thumbnail: data.thumbnail || "", duration: data.duration, uploader: data.uploader || "", formats: data.formats || [], selectedFormatId: data.formats?.[0]?.id || null };
@@ -1033,7 +1097,7 @@
     async function downloadCard(i) {
       const card = cardData[i]; card.status = "downloading"; card.error = ""; card.downloadUrl = ""; renderCard(i);
       try {
-        const res = await fetch("/api/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: card.url, format: currentFormat, format_id: card.selectedFormatId, title: card.title || "" }) });
+        const res = await fetch("/api/download", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: card.url, format: currentFormat, format_id: card.selectedFormatId, title: card.title || "", cookies_netscape: getCookiesNetscapePayload() }) });
         const ct = (res.headers.get("content-type") || "").toLowerCase();
         if (ct.includes("application/json")) {
           const data = await res.json();
