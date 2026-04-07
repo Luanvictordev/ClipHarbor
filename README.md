@@ -24,7 +24,7 @@ Self-hosted media downloader with a Flask UI for batching links, choosing format
 | `templates/index.html` | Single-page UI |
 | `public/` | Static assets (favicon) |
 | `requirements.txt` | Python dependencies |
-| `vercel.json` / `runtime.txt` | Vercel function duration & Python version |
+| `runtime.txt` | Python version on Vercel |
 | `Dockerfile` / `Procfile` | Container & process examples |
 
 Copy `.env.example` to `.env` if you need local overrides (optional).
@@ -57,7 +57,7 @@ Vercel Functions cannot return media files larger than about **4.5 MB** in one r
 
 1. In the Vercel dashboard: **Storage** → **Create Database** → **Blob** → attach it to this project (or use **Connect Project** on an existing store).
 2. Redeploy so **`BLOB_READ_WRITE_TOKEN`** appears in **Settings → Environment Variables** for Production (and Preview if you use it).
-3. **Functions → max duration**: `vercel.json` requests up to **300** seconds; on Hobby the cap is lower (often **60** s)—upgrade or accept shorter runs for very long downloads.
+3. **Function duration**: in the Vercel dashboard, **Project → Settings → Functions**, raise **Max Duration** as high as your plan allows (Hobby is often capped around **60** s; longer downloads may need a paid plan or self-hosting). Do not add a `functions` entry in `vercel.json` for root `app.py`—it only matches the `api/` folder and breaks the build.
 
 Locally, you can omit `BLOB_READ_WRITE_TOKEN`: the app serves files directly with `send_file` as before.
 
