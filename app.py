@@ -1,3 +1,5 @@
+import base64
+import binascii
 import glob
 import json
 import logging
@@ -7,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 from flask import Flask, jsonify, render_template, request, send_file, send_from_directory
@@ -46,8 +49,44 @@ limiter = Limiter(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def yt_dlp_command(*args):
-    return [sys.executable, "-m", "yt_dlp", "--no-playlist", *args]
+def yt_dlp_command(*args, cookies_path: str | None = None):
+    cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist"]
+    if cookies_path:
+        cmd.extend(["--cookies", cookies_path])
+    cmd.extend(args)
+    return cmd
+
+
+@contextmanager
+def yt_dlp_cookies_context():
+    """Netscape-format cookies for yt-dlp (needed for many YouTube URLs). See .env.example."""
+    path = (os.environ.get("YT_DLP_COOKIES_FILE") or os.environ.get("YT_DLP_COOKIES_PATH") or "").strip()
+    if path and Path(path).is_file():
+        yield path
+        return
+
+    b64 = (os.environ.get("YT_DLP_COOKIES_B64") or "").strip()
+    if not b64:
+        yield None
+        return
+
+    try:
+        raw = base64.b64decode(b64)
+    except (ValueError, binascii.Error):
+        logger.warning("YT_DLP_COOKIES_B64 is not valid base64; ignoring.")
+        yield None
+        return
+
+    fd, tmp = tempfile.mkstemp(prefix="yt-cookies-", suffix=".txt")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(raw)
+        yield tmp
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
 
 
 def get_ffmpeg_location() -> str:
@@ -67,6 +106,19 @@ def last_error_line(stderr: str | None) -> str:
     if not text:
         return "The request could not be completed."
     return text.splitlines()[-1]
+
+
+def ytdlp_error_message(stderr: str | None) -> str:
+    err = last_error_line(stderr)
+    low = err.lower()
+    if "sign in to confirm" in low or "not a bot" in low:
+        return (
+            f"{err} "
+            "ClipHarbor: set YT_DLP_COOKIES_FILE (path to Netscape cookies.txt) or "
+            "YT_DLP_COOKIES_B64 (base64 of that file) for YouTube. "
+            "See https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies"
+        )
+    return err
 
 
 def sanitize_filename(value: str, fallback: str) -> str:
@@ -157,13 +209,14 @@ def get_info():
     if not url.startswith(("http://", "https://")):
         return jsonify({"error": "Invalid URL"}), 400
 
-    command = yt_dlp_command("-j", url)
     logger.info("Fetching info for: %s", url)
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+        with yt_dlp_cookies_context() as ck:
+            command = yt_dlp_command("-j", url, cookies_path=ck)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
-            err = last_error_line(result.stderr)
+            err = ytdlp_error_message(result.stderr)
             logger.warning("yt-dlp info failed for %s: %s", url, err)
             return jsonify({"error": err}), 400
 
@@ -223,31 +276,30 @@ def download_media():
     output_template = str(temp_dir / "clipharbor.%(ext)s")
     ffmpeg_path = get_ffmpeg_location()
 
-    command = yt_dlp_command("-o", output_template)
-
-    if format_choice == "audio":
-        command += ["-x", "--audio-format", "mp3", "--ffmpeg-location", ffmpeg_path]
-    elif format_id:
-        command += [
-            "-f", f"{format_id}+bestaudio/best",
-            "--merge-output-format", "mp4",
-            "--ffmpeg-location", ffmpeg_path,
-        ]
-    else:
-        command += [
-            "-f", "bestvideo+bestaudio/best",
-            "--merge-output-format", "mp4",
-            "--ffmpeg-location", ffmpeg_path,
-        ]
-
-    command.append(url)
     logger.info("Downloading [%s] %s (format_id=%s)", format_choice, url, format_id)
 
     try:
-        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        with yt_dlp_cookies_context() as ck:
+            command = yt_dlp_command("-o", output_template, cookies_path=ck)
+            if format_choice == "audio":
+                command += ["-x", "--audio-format", "mp3", "--ffmpeg-location", ffmpeg_path]
+            elif format_id:
+                command += [
+                    "-f", f"{format_id}+bestaudio/best",
+                    "--merge-output-format", "mp4",
+                    "--ffmpeg-location", ffmpeg_path,
+                ]
+            else:
+                command += [
+                    "-f", "bestvideo+bestaudio/best",
+                    "--merge-output-format", "mp4",
+                    "--ffmpeg-location", ffmpeg_path,
+                ]
+            command.append(url)
+            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
 
         if result.returncode != 0:
-            err = last_error_line(result.stderr)
+            err = ytdlp_error_message(result.stderr)
             logger.warning("yt-dlp download failed for %s: %s", url, err)
             shutil.rmtree(temp_dir, ignore_errors=True)
             return jsonify({"error": err}), 400

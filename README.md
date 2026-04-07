@@ -61,6 +61,15 @@ Vercel Functions cannot return media files larger than about **4.5 MB** in one r
 
 Locally, you can omit `BLOB_READ_WRITE_TOKEN`: the app serves files directly with `send_file` as before.
 
+### YouTube (“Sign in to confirm you’re not a bot”)
+
+YouTube often requires authenticated cookies. Export a **Netscape-format** `cookies.txt` (see [yt-dlp: exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)), then:
+
+- **Local / Docker:** set `YT_DLP_COOKIES_FILE` to the absolute path of that file.
+- **Vercel:** base64-encode the file contents and set `YT_DLP_COOKIES_B64` in **Environment Variables** (Production). Cookies expire; refresh when downloads fail again.
+
+Keep `yt-dlp` up to date (`pip install -U yt-dlp`); YouTube changes frequently.
+
 ## Docker
 
 ```bash
