@@ -61,14 +61,17 @@ Vercel Functions cannot return media files larger than about **4.5 MB** in one r
 
 Locally, you can omit `BLOB_READ_WRITE_TOKEN`: the app serves files directly with `send_file` as before.
 
-### YouTube (“Sign in to confirm you’re not a bot”)
+### YouTube limitations (no “magic” fix)
 
-YouTube often requires authenticated cookies. Export a **Netscape-format** `cookies.txt` (see [yt-dlp: exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)), then:
+YouTube is built to limit automated access from **datacenter IPs** (including Vercel). There is **no** stable, free, set-and-forget method that never changes and uses **nothing** of yours—cookies, residential IP, or paid third-party services are the realistic options the ecosystem uses.
 
-- **Local / Docker:** set `YT_DLP_COOKIES_FILE` to the absolute path of that file.
-- **Vercel:** base64-encode the file contents and set `YT_DLP_COOKIES_B64` in **Environment Variables** (Production). Cookies expire; refresh when downloads fail again.
+**Practical approach without uploading your cookies to the cloud:** run ClipHarbor **on your own computer** at home. `yt-dlp` often works on **residential** networks without extra configuration.
 
-Keep `yt-dlp` up to date (`pip install -U yt-dlp`); YouTube changes frequently.
+**If you must host in the cloud:** expect failures unless you supply **cookies** (they expire; see [exporting YouTube cookies](https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies)) via `YT_DLP_COOKIES_FILE` or `YT_DLP_COOKIES_B64`.
+
+**Power users:** optional `YT_DLP_YOUTUBE_EXTRACTOR_ARGS` (e.g. `youtube:player_client=android,tv`) may help briefly until YouTube changes again—see [yt-dlp usage](https://github.com/yt-dlp/yt-dlp#usage).
+
+Keep `yt-dlp` updated; YouTube changes frequently.
 
 ## Docker
 

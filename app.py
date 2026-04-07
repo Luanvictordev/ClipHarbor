@@ -11,6 +11,7 @@ import tempfile
 import uuid
 from contextlib import contextmanager
 from pathlib import Path
+from urllib.parse import urlparse
 
 from flask import Flask, jsonify, render_template, request, send_file, send_from_directory
 from flask_limiter import Limiter
@@ -49,10 +50,32 @@ limiter = Limiter(
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-def yt_dlp_command(*args, cookies_path: str | None = None):
+def is_youtube_url(url: str) -> bool:
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    if not host:
+        return False
+    return host == "youtu.be" or host.endswith(
+        ".youtu.be"
+    ) or host == "youtube.com" or host.endswith(".youtube.com")
+
+
+def yt_dlp_cookies_configured() -> bool:
+    path = (os.environ.get("YT_DLP_COOKIES_FILE") or os.environ.get("YT_DLP_COOKIES_PATH") or "").strip()
+    if path and Path(path).is_file():
+        return True
+    return bool((os.environ.get("YT_DLP_COOKIES_B64") or "").strip())
+
+
+def yt_dlp_command(media_url: str, *args, cookies_path: str | None = None):
     cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist"]
     if cookies_path:
         cmd.extend(["--cookies", cookies_path])
+    spec = (os.environ.get("YT_DLP_YOUTUBE_EXTRACTOR_ARGS") or "").strip()
+    if spec and is_youtube_url(media_url):
+        cmd.extend(["--extractor-args", spec])
     cmd.extend(args)
     return cmd
 
@@ -108,17 +131,27 @@ def last_error_line(stderr: str | None) -> str:
     return text.splitlines()[-1]
 
 
-def ytdlp_error_message(stderr: str | None) -> str:
+def ytdlp_error_message(stderr: str | None, media_url: str = "") -> str:
     err = last_error_line(stderr)
     low = err.lower()
-    if "sign in to confirm" in low or "not a bot" in low:
-        return (
-            f"{err} "
-            "ClipHarbor: set YT_DLP_COOKIES_FILE (path to Netscape cookies.txt) or "
-            "YT_DLP_COOKIES_B64 (base64 of that file) for YouTube. "
-            "See https://github.com/yt-dlp/yt-dlp/wiki/Extractors#exporting-youtube-cookies"
+    if "sign in to confirm" not in low and "not a bot" not in low:
+        return err
+    parts = [err]
+    if is_youtube_url(media_url):
+        parts.append(
+            "YouTube often blocks anonymous downloads from cloud/datacenter IPs. "
+            "There is no stable free workaround that never breaks and uses nothing of yours—"
+            "that is intentional on YouTube's side. "
+            "To avoid putting your cookies on a server: run ClipHarbor on your home PC "
+            "(residential IP); yt-dlp frequently works there with no extra setup. "
+            "For cloud hosting, cookies (they expire) or similar auth are what yt-dlp supports."
         )
-    return err
+    elif not yt_dlp_cookies_configured():
+        parts.append(
+            "If this site requires a logged-in session, configure YT_DLP_COOKIES_FILE or "
+            "YT_DLP_COOKIES_B64. See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
+        )
+    return " ".join(parts)
 
 
 def sanitize_filename(value: str, fallback: str) -> str:
@@ -213,10 +246,10 @@ def get_info():
 
     try:
         with yt_dlp_cookies_context() as ck:
-            command = yt_dlp_command("-j", url, cookies_path=ck)
+            command = yt_dlp_command(url, "-j", url, cookies_path=ck)
             result = subprocess.run(command, capture_output=True, text=True, timeout=60)
         if result.returncode != 0:
-            err = ytdlp_error_message(result.stderr)
+            err = ytdlp_error_message(result.stderr, url)
             logger.warning("yt-dlp info failed for %s: %s", url, err)
             return jsonify({"error": err}), 400
 
@@ -280,7 +313,7 @@ def download_media():
 
     try:
         with yt_dlp_cookies_context() as ck:
-            command = yt_dlp_command("-o", output_template, cookies_path=ck)
+            command = yt_dlp_command(url, "-o", output_template, cookies_path=ck)
             if format_choice == "audio":
                 command += ["-x", "--audio-format", "mp3", "--ffmpeg-location", ffmpeg_path]
             elif format_id:
@@ -299,7 +332,7 @@ def download_media():
             result = subprocess.run(command, capture_output=True, text=True, timeout=300)
 
         if result.returncode != 0:
-            err = ytdlp_error_message(result.stderr)
+            err = ytdlp_error_message(result.stderr, url)
             logger.warning("yt-dlp download failed for %s: %s", url, err)
             shutil.rmtree(temp_dir, ignore_errors=True)
             return jsonify({"error": err}), 400
