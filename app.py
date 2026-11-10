@@ -153,13 +153,13 @@ def get_spotify_info(url: str) -> dict:
             if "/album/" in url.lower():
                 from spotdl.types.album import Album
 
-                album = Album.from_url(url)
+                album = Album.from_url(url, fetch_songs=False)
                 songs = album.songs
                 name = album.name
             else:
                 from spotdl.types.playlist import Playlist
 
-                playlist = Playlist.from_url(url)
+                playlist = Playlist.from_url(url, fetch_songs=False)
                 songs = playlist.songs
                 name = playlist.name
 
