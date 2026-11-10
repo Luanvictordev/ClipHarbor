@@ -9,6 +9,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import zipfile
 from contextlib import contextmanager
 from pathlib import Path
 from urllib.parse import urlparse
@@ -60,6 +61,144 @@ def is_youtube_url(url: str) -> bool:
     return host == "youtu.be" or host.endswith(
         ".youtu.be"
     ) or host == "youtube.com" or host.endswith(".youtube.com")
+
+
+def is_spotify_url(url: str) -> bool:
+    """Recognize Spotify links."""
+    try:
+        host = (urlparse(url).hostname or "").lower()
+    except ValueError:
+        return False
+    return host == "spotify.com" or host.endswith(".spotify.com")
+
+
+def is_spotify_playlist_url(url: str) -> bool:
+    """Recognize Spotify playlist or album links."""
+    try:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        if host == "spotify.com" or host.endswith(".spotify.com"):
+            path = parsed.path.lower()
+            return "/playlist/" in path or "/album/" in path
+    except Exception:
+        pass
+    return False
+
+
+_spotify_client_initialized = False
+
+
+def ensure_spotify_client():
+    global _spotify_client_initialized
+    if not _spotify_client_initialized:
+        try:
+            from spotdl.utils.spotify import SpotifyClient
+
+            SpotifyClient.init("", "")
+            _spotify_client_initialized = True
+        except Exception as exc:
+            logger.warning("Could not initialize SpotifyClient: %s", exc)
+
+
+def get_spotify_track_info(url: str) -> dict:
+    ensure_spotify_client()
+    try:
+        from spotdl.types.song import Song
+
+        song = Song.from_url(url)
+        artists = ", ".join(song.artists) if song.artists else ""
+        title = f"{artists} - {song.name}" if artists else song.name
+        return {
+            "title": title,
+            "thumbnail": song.cover_url or "",
+            "duration": song.duration,
+            "uploader": artists or "Spotify",
+            "formats": [
+                {"id": "mp3", "label": "MP3 Audio (320kbps)", "height": 0}
+            ],
+        }
+    except Exception as exc:
+        logger.warning("spotdl metadata failed for %s (%s); trying oEmbed fallback", url, exc)
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"https://open.spotify.com/oembed?url={url}",
+            headers={"User-Agent": "Mozilla/5.0"},
+        )
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        title = data.get("title") or "Spotify Track"
+        thumb = data.get("thumbnail_url") or ""
+        return {
+            "title": title,
+            "thumbnail": thumb,
+            "duration": None,
+            "uploader": "Spotify",
+            "formats": [
+                {"id": "mp3", "label": "MP3 Audio (320kbps)", "height": 0}
+            ],
+        }
+
+
+def get_spotify_info(url: str) -> dict:
+    ensure_spotify_client()
+    if is_spotify_playlist_url(url):
+        try:
+            if "/album/" in url.lower():
+                from spotdl.types.album import Album
+
+                album = Album.from_url(url)
+                songs = album.songs
+                name = album.name
+            else:
+                from spotdl.types.playlist import Playlist
+
+                playlist = Playlist.from_url(url)
+                songs = playlist.songs
+                name = playlist.name
+
+            tracks = []
+            for s in songs:
+                artists = ", ".join(s.artists) if s.artists else ""
+                title = f"{artists} - {s.name}" if artists else s.name
+                tracks.append(
+                    {
+                        "url": s.url,
+                        "title": title,
+                        "thumbnail": s.cover_url or "",
+                        "duration": s.duration,
+                        "uploader": artists or "Spotify",
+                        "formats": [
+                            {"id": "mp3", "label": "MP3 Audio (320kbps)", "height": 0}
+                        ],
+                    }
+                )
+
+            return {
+                "is_playlist": True,
+                "title": name,
+                "track_count": len(tracks),
+                "tracks": tracks,
+            }
+        except Exception as exc:
+            logger.warning("spotdl playlist lookup failed for %s (%s); trying oEmbed fallback", url, exc)
+            import urllib.request
+
+            req = urllib.request.Request(
+                f"https://open.spotify.com/oembed?url={url}",
+                headers={"User-Agent": "Mozilla/5.0"},
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+            return {
+                "is_playlist": True,
+                "title": data.get("title") or "Spotify Playlist",
+                "track_count": 0,
+                "tracks": [],
+                "thumbnail": data.get("thumbnail_url") or "",
+            }
+
+    return get_spotify_track_info(url)
 
 
 def yt_dlp_cookies_configured() -> bool:
@@ -242,6 +381,14 @@ def get_info():
     if not url.startswith(("http://", "https://")):
         return jsonify({"error": "Invalid URL"}), 400
 
+    if is_spotify_url(url):
+        try:
+            info = get_spotify_info(url)
+            return jsonify(info)
+        except Exception as exc:
+            logger.exception("Failed to get Spotify info for %s", url)
+            return jsonify({"error": f"Erro ao buscar detalhes do Spotify: {exc}"}), 400
+
     logger.info("Fetching info for: %s", url)
 
     try:
@@ -301,6 +448,90 @@ def download_media():
 
     if not url.startswith(("http://", "https://")):
         return jsonify({"error": "Invalid URL"}), 400
+
+    if is_spotify_url(url):
+        temp_dir = Path(tempfile.mkdtemp(prefix="clipharbor-spotify-"))
+        ffmpeg_path = get_ffmpeg_location()
+        logger.info("Downloading Spotify track %s into %s", url, temp_dir)
+        try:
+            cmd = [
+                sys.executable,
+                "-m",
+                "spotdl",
+                "download",
+                url,
+                "--output",
+                str(temp_dir),
+                "--ffmpeg",
+                ffmpeg_path,
+                "--format",
+                "mp3",
+                "--threads",
+                "4",
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+            if result.returncode != 0:
+                err = last_error_line(result.stderr) or last_error_line(result.stdout)
+                logger.warning("spotdl download failed for %s: %s", url, err)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return jsonify({"error": f"Erro no download do Spotify: {err}"}), 400
+
+            files = glob.glob(str(temp_dir / "*.mp3"))
+            if not files:
+                logger.error("No MP3 file produced for Spotify URL: %s", url)
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return jsonify({"error": "O download concluiu, mas nenhum arquivo MP3 foi gerado."}), 500
+
+            if len(files) > 1 or is_spotify_playlist_url(url):
+                zip_base = sanitize_filename(title or "spotify_playlist", "playlist")
+                zip_filename = f"{zip_base}.zip"
+                zip_filepath = str(temp_dir / zip_filename)
+                with zipfile.ZipFile(zip_filepath, "w", zipfile.ZIP_DEFLATED) as zf:
+                    for f in files:
+                        if f != zip_filepath:
+                            zf.write(f, arcname=Path(f).name)
+                chosen_file = zip_filepath
+                filename = zip_filename
+            else:
+                chosen_file = files[0]
+                filename = Path(chosen_file).name
+
+            logger.info("Serving Spotify file: %s as %s", chosen_file, filename)
+
+            if blob_configured():
+                return upload_to_blob_and_respond(chosen_file, filename, temp_dir)
+
+            if is_vercel():
+                shutil.rmtree(temp_dir, ignore_errors=True)
+                return (
+                    jsonify(
+                        {
+                            "error": (
+                                "Large downloads on Vercel need Blob storage. In the Vercel dashboard: "
+                                "Storage → Create Blob → connect it to this project, then redeploy so "
+                                "BLOB_READ_WRITE_TOKEN is set."
+                            )
+                        }
+                    ),
+                    503,
+                )
+
+            response = send_file(
+                chosen_file,
+                as_attachment=True,
+                download_name=filename,
+                max_age=0,
+            )
+            response.call_on_close(lambda: shutil.rmtree(temp_dir, ignore_errors=True))
+            return response
+        except subprocess.TimeoutExpired:
+            logger.error("Timeout downloading Spotify URL: %s", url)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"error": "Download do Spotify expirou (tempo limite excedido)."}), 400
+        except Exception as exc:
+            logger.exception("Unexpected error downloading Spotify URL: %s", url)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"error": str(exc)}), 500
 
     if format_choice not in ("video", "audio"):
         return jsonify({"error": "Invalid format"}), 400

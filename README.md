@@ -10,11 +10,13 @@ Self-hosted media downloader with a Flask UI for batching links, choosing format
 ## Features
 
 - Download media from 1000+ supported sites through [yt-dlp](https://github.com/yt-dlp/yt-dlp)
+- Spotify track downloads with automatic metadata and album artwork via [spotDL](https://github.com/spotDL/spotify-downloader)
 - MP4 video downloads and MP3 audio extraction
 - Resolution picker for video downloads
 - Batch URL support with automatic deduplication
 - Refreshed responsive interface with a queue-first layout
 - Vercel-friendly synchronous download flow with no background worker state
+- Spotify links are recognized and show the official offline-listening option
 
 ## Repository layout
 
@@ -72,6 +74,10 @@ YouTube is built to limit automated access from **datacenter IPs** (including Ve
 **Power users:** optional `YT_DLP_YOUTUBE_EXTRACTOR_ARGS` (e.g. `youtube:player_client=android,tv`) may help briefly until YouTube changes again—see [yt-dlp usage](https://github.com/yt-dlp/yt-dlp#usage).
 
 Keep `yt-dlp` updated; YouTube changes frequently.
+
+### Spotify support
+
+ClipHarbor integrates [spotDL](https://github.com/spotDL/spotify-downloader) to support Spotify track URLs. When a Spotify track link is entered, ClipHarbor gathers the track metadata (artist, title, cover artwork, and duration) and downloads the matching high-quality audio stream, tagging the output MP3 with the official Spotify artwork and tags.
 
 ## Docker
 

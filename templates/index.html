@@ -323,6 +323,24 @@
       padding-bottom: 40px;
     }
 
+    .queue-toolbar {
+      width: 100%;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 12px 18px;
+      background: var(--ds-bg);
+      border: 1px solid var(--ds-gray-200);
+      border-radius: 12px;
+      animation: slideDown 0.3s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    .queue-count {
+      font-size: 0.95rem;
+      font-weight: 500;
+      color: var(--ds-gray-900);
+    }
+
     .result-card {
       display: flex;
       background: var(--ds-bg);
@@ -853,9 +871,11 @@
     const translations = {
       en: {
         heroSub: "Drop a link to download MP4 or MP3 instantly.",
-        placeholder: "Paste YouTube, TikTok, Reddit URLs...",
+        placeholder: "Paste YouTube, Spotify, TikTok, Reddit URLs...",
         retry: "Retry", download: "Download", downloading: "Downloading...",
         downloadAgain: "Download Again", saved: "Saved",
+        downloadAll: "Download All",
+        queueCountText: "tracks in queue",
         coffeeBtn: "Buy me a coffee",
         modalTitle: "Buy me a coffee ☕",
         modalText: "Support the project via PIX!",
@@ -864,9 +884,11 @@
       },
       pt: {
         heroSub: "Solte um link para baixar MP4 ou MP3 instantaneamente.",
-        placeholder: "Cole URLs do YouTube, TikTok, Reddit...",
+        placeholder: "Cole URLs do YouTube, Spotify, TikTok, Reddit...",
         retry: "Repetir", download: "Baixar", downloading: "Baixando...",
         downloadAgain: "Baixar Novamente", saved: "Salvo",
+        downloadAll: "Baixar Todas",
+        queueCountText: "músicas na fila",
         coffeeBtn: "Pague-me um café",
         modalTitle: "Pague-me um café ☕",
         modalText: "Apoie o projeto através de um PIX!",
@@ -875,9 +897,11 @@
       },
       es: {
         heroSub: "Suelta un enlace para descargar MP4 o MP3 al instante.",
-        placeholder: "Pega URLs de YouTube, TikTok, Reddit...",
+        placeholder: "Pega URLs de YouTube, Spotify, TikTok, Reddit...",
         retry: "Reintentar", download: "Descargar", downloading: "Descargando...",
         downloadAgain: "Descargar de nuevo", saved: "Guardado",
+        downloadAll: "Descargar Todo",
+        queueCountText: "canciones en cola",
         coffeeBtn: "Cómprame un café",
         modalTitle: "Cómprame un café ☕",
         modalText: "¡Apoya el proyecto haciendo un PIX!",
@@ -985,17 +1009,63 @@
 
       urlsField.value = ""; urlsField.style.height = ''; goBtn.disabled = true;
 
-      for (let i = startIndex; i < cardData.length; i++) renderCard(i);
+      renderAllCards();
 
-      for (let i = startIndex; i < cardData.length; i++) {
+      let i = startIndex;
+      while (i < cardData.length) {
         const url = cardData[i].url;
         try {
           const res = await fetch("/api/info", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url }) });
           const data = await res.json();
-          if (!res.ok || data.error) cardData[i] = { ...cardData[i], status: "error", error: data.error || "Failed to inspect." };
-          else cardData[i] = { ...cardData[i], status: "ready", title: data.title || "Untitled", thumbnail: data.thumbnail || "", duration: data.duration, uploader: data.uploader || "", formats: data.formats || [], selectedFormatId: data.formats?.[0]?.id || null };
-        } catch (e) { cardData[i] = { ...cardData[i], status: "error", error: "Network error." }; }
-        renderCard(i);
+          if (!res.ok || data.error) {
+            cardData[i] = { ...cardData[i], status: "error", error: data.error || "Failed to inspect." };
+            i++;
+          } else if (data.is_playlist && data.tracks && data.tracks.length > 0) {
+            const newCards = data.tracks.map(tr => ({
+              url: tr.url,
+              status: "ready",
+              title: tr.title || "Untitled",
+              thumbnail: tr.thumbnail || "",
+              duration: tr.duration,
+              uploader: tr.uploader || "",
+              formats: tr.formats || [],
+              selectedFormatId: tr.formats?.[0]?.id || null,
+              playlistName: data.title
+            }));
+            cardData.splice(i, 1, ...newCards);
+            i += newCards.length;
+          } else {
+            cardData[i] = { ...cardData[i], status: "ready", title: data.title || "Untitled", thumbnail: data.thumbnail || "", duration: data.duration, uploader: data.uploader || "", formats: data.formats || [], selectedFormatId: data.formats?.[0]?.id || null };
+            i++;
+          }
+        } catch (e) {
+          cardData[i] = { ...cardData[i], status: "error", error: "Network error." };
+          i++;
+        }
+        renderAllCards();
+      }
+    }
+
+    function renderAllCards() {
+      resultsMount.innerHTML = "";
+      if (cardData.length > 1) {
+        const hasReady = cardData.some(c => c.status === "ready" || c.status === "error" || c.status === "done");
+        if (hasReady) {
+          const t = translations[currentLang];
+          const toolbar = document.createElement("div");
+          toolbar.className = "queue-toolbar";
+          toolbar.innerHTML = `
+            <span class="queue-count">${cardData.length} ${t.queueCountText || "faixas na fila"}</span>
+            <button class="action-btn primary" id="downloadAllBtn" onclick="downloadAll()">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg>
+              ${t.downloadAll || "Baixar Todas"}
+            </button>
+          `;
+          resultsMount.appendChild(toolbar);
+        }
+      }
+      for (let j = 0; j < cardData.length; j++) {
+        renderCard(j);
       }
     }
 
@@ -1004,7 +1074,7 @@
       let node = document.getElementById(`card-${i}`);
       if (!node) {
         node = document.createElement("div"); node.id = `card-${i}`; node.className = "result-card";
-        if (resultsMount.firstChild) resultsMount.insertBefore(node, resultsMount.firstChild); else resultsMount.appendChild(node);
+        resultsMount.appendChild(node);
       }
 
       if (card.status === "loading") { node.innerHTML = `<div class="result-thumb"><div class="pulse"></div></div><div class="result-body"><div class="skeleton-bar" style="width: 70%; margin-bottom: 8px;"></div><div class="skeleton-bar" style="width: 40%;"></div></div>`; return; }
@@ -1025,7 +1095,22 @@
         actions = `<button class="action-btn" onclick="saveFile(${i})">${t.downloadAgain}</button><span class="status-text success">${t.saved} ${escapeHtml(card.filename)}</span>`;
       }
 
-      node.innerHTML = `<div class="result-thumb">${card.thumbnail && !isAudio ? `<img src="${card.thumbnail}" />` : "Media"}</div><div class="result-body"><div class="result-title">${escapeHtml(card.title || "Untitled")}</div><div class="result-meta">${escapeHtml(card.uploader)} ${card.duration ? '· ' + formatDuration(card.duration) : ''}</div><div class="result-actions">${actions}</div></div>`;
+      node.innerHTML = `<div class="result-thumb">${card.thumbnail ? `<img src="${card.thumbnail}" />` : "Media"}</div><div class="result-body"><div class="result-title">${escapeHtml(card.title || "Untitled")}</div><div class="result-meta">${escapeHtml(card.uploader)} ${card.duration ? '· ' + formatDuration(card.duration) : ''}</div><div class="result-actions">${actions}</div></div>`;
+    }
+
+    let isDownloadingAll = false;
+    async function downloadAll() {
+      if (isDownloadingAll) return;
+      isDownloadingAll = true;
+      const btn = document.getElementById("downloadAllBtn");
+      if (btn) btn.disabled = true;
+      for (let i = 0; i < cardData.length; i++) {
+        if (cardData[i].status === "ready" || cardData[i].status === "error") {
+          await downloadCard(i);
+        }
+      }
+      if (btn) btn.disabled = false;
+      isDownloadingAll = false;
     }
 
     function setFormatId(i, id) { cardData[i].selectedFormatId = id; renderCard(i); }
