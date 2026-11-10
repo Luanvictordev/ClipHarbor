@@ -81,6 +81,8 @@ ClipHarbor integrates [spotDL](https://github.com/spotDL/spotify-downloader) to 
 
 For Render or another container host, use the included `Dockerfile` (it installs system `ffmpeg`) or configure the service to install `ffmpeg` before starting. spotDL searches for a matching audio source, so cloud network restrictions or source-site changes can still make a track fail. Set `SPOTDL_THREADS` to tune per-download parallelism (default: `2`); raising it can increase memory/CPU usage and may reduce reliability on small instances.
 
+On the first Spotify download, ClipHarbor installs spotDL's bundled Deno runtime if the host does not already have Deno. spotDL needs this runtime for some YouTube audio matches; later downloads reuse the installed binary.
+
 ## Docker
 
 ```bash

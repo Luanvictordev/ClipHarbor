@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -31,6 +32,32 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
+
+_spotdl_deno_lock = threading.Lock()
+
+
+def ensure_spotdl_deno() -> None:
+    """Install spotDL's bundled Deno runtime on hosts without system Deno."""
+    from spotdl.utils.deno import is_deno_installed
+
+    if is_deno_installed():
+        return
+
+    with _spotdl_deno_lock:
+        if is_deno_installed():
+            return
+        logger.info("Deno is missing; installing the spotDL-bundled runtime")
+        result = subprocess.run(
+            [sys.executable, "-m", "spotdl", "--download-deno"],
+            capture_output=True,
+            text=True,
+            timeout=180,
+        )
+        if result.returncode != 0 or not is_deno_installed():
+            details = last_error_line(result.stderr if result.stderr.strip() else result.stdout)
+            logger.error("Could not install Deno for spotDL: %s", details)
+            raise RuntimeError(f"Não foi possível preparar o Deno para baixar do YouTube: {details}")
+        logger.info("spotDL-bundled Deno runtime installed")
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -466,6 +493,7 @@ def download_media():
         ffmpeg_path = get_ffmpeg_location()
         logger.info("Downloading Spotify track %s into %s", url, temp_dir)
         try:
+            ensure_spotdl_deno()
             cmd = [
                 sys.executable,
                 "-m",
