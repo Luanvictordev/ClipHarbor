@@ -20,11 +20,8 @@ from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
 try:
     import vercel_blob
-except ImportError:
-    try:
-        from vercel import blob as vercel_blob
-    except ImportError:
-        vercel_blob = None
+except (ImportError, ModuleNotFoundError):
+    vercel_blob = None
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -321,6 +318,9 @@ def blob_configured() -> bool:
 
 def upload_to_blob_and_respond(chosen_file: str, download_filename: str, temp_dir: Path):
     """Upload finished media to Vercel Blob and return a small JSON payload (avoids the ~4.5MB function response limit)."""
+    if vercel_blob is None:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        return jsonify({"error": "Vercel Blob SDK is unavailable in this deployment."}), 503
     path = Path(chosen_file)
     blob_path = f"clipharbor/{uuid.uuid4().hex}/{path.name}"
     try:

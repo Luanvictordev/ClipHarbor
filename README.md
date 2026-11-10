@@ -57,7 +57,7 @@ vercel
 
 Vercel Functions cannot return media files larger than about **4.5 MB** in one response. After a download finishes, the app uploads the file to **[Vercel Blob](https://vercel.com/docs/vercel-blob)** (free tier on the Hobby plan) and the browser opens the Blob **download URL** instead.
 
-1. In the Vercel dashboard: **Storage** → **Create Database** → **Blob** → attach it to this project (or use **Connect Project** on an existing store).
+1. In the Vercel dashboard: **Storage** → **Create Database** → **Blob** → attach it to this project (or use **Connect Project** on an existing store). The Blob SDK is installed for Vercel deployments and is optional on other hosts.
 2. Redeploy so **`BLOB_READ_WRITE_TOKEN`** appears in **Settings → Environment Variables** for Production (and Preview if you use it).
 3. **Function duration**: in the Vercel dashboard, **Project → Settings → Functions**, raise **Max Duration** as high as your plan allows (Hobby is often capped around **60** s; longer downloads may need a paid plan or self-hosting). Do not add a `functions` entry in `vercel.json` for root `app.py`—it only matches the `api/` folder and breaks the build.
 
