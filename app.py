@@ -473,7 +473,7 @@ def download_media():
                 "download",
                 url,
                 "--output",
-                str(temp_dir),
+                str(temp_dir / "{artists} - {title}.{output-ext}"),
                 "--ffmpeg",
                 ffmpeg_path,
                 "--format",
@@ -501,11 +501,18 @@ def download_media():
                 time.monotonic() - started_at,
             )
 
-            files = glob.glob(str(temp_dir / "*.mp3"))
+            files = glob.glob(str(temp_dir / "**" / "*.mp3"), recursive=True)
             if not files:
-                logger.error("No MP3 file produced for Spotify URL: %s", url)
+                produced = [str(path.relative_to(temp_dir)) for path in temp_dir.rglob("*") if path.is_file()]
+                logger.error(
+                    "spotdl returned success but produced no MP3 for %s; files=%s; stdout=%s; stderr=%s",
+                    url,
+                    produced[:20],
+                    last_error_line(result.stdout),
+                    last_error_line(result.stderr),
+                )
                 shutil.rmtree(temp_dir, ignore_errors=True)
-                return jsonify({"error": "O download concluiu, mas nenhum arquivo MP3 foi gerado."}), 500
+                return jsonify({"error": "spotDL terminou sem gerar o MP3. Consulte os logs do serviço para ver a saída do spotDL."}), 500
 
             if len(files) > 1 or is_spotify_playlist_url(url):
                 zip_base = sanitize_filename(title or "spotify_playlist", "playlist")
