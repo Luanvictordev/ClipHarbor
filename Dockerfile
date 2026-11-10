@@ -8,6 +8,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+RUN python -m spotdl --download-deno
 
 COPY . .
 
@@ -15,4 +16,4 @@ EXPOSE 8899
 ENV HOST=0.0.0.0
 ENV PORT=8899
 
-CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8899} --workers 2 --timeout 360 --keep-alive 5"]
+CMD ["sh", "-c", "gunicorn app:app --bind 0.0.0.0:${PORT:-8899} --workers ${WEB_CONCURRENCY:-1} --timeout 360 --keep-alive 5"]
