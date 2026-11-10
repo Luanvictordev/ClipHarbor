@@ -17,7 +17,13 @@ from urllib.parse import urlparse
 from flask import Flask, jsonify, render_template, request, send_file, send_from_directory
 from flask_limiter import Limiter
 from flask_limiter.util import get_remote_address
-import vercel_blob
+try:
+    import vercel_blob
+except ImportError:
+    try:
+        from vercel import blob as vercel_blob
+    except ImportError:
+        vercel_blob = None
 
 # ---------------------------------------------------------------------------
 # Logging
@@ -304,7 +310,7 @@ def is_vercel() -> bool:
 
 
 def blob_configured() -> bool:
-    return bool(os.environ.get("BLOB_READ_WRITE_TOKEN"))
+    return vercel_blob is not None and bool(os.environ.get("BLOB_READ_WRITE_TOKEN"))
 
 
 def upload_to_blob_and_respond(chosen_file: str, download_filename: str, temp_dir: Path):
