@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 import zipfile
 from contextlib import contextmanager
@@ -153,13 +154,15 @@ def get_spotify_info(url: str) -> dict:
             if "/album/" in url.lower():
                 from spotdl.types.album import Album
 
-                album = Album.from_url(url, fetch_songs=False)
+                # We render each track as a separate downloadable card, so the
+                # album lookup must actually fetch its songs.
+                album = Album.from_url(url, fetch_songs=True)
                 songs = album.songs
                 name = album.name
             else:
                 from spotdl.types.playlist import Playlist
 
-                playlist = Playlist.from_url(url, fetch_songs=False)
+                playlist = Playlist.from_url(url, fetch_songs=True)
                 songs = playlist.songs
                 name = playlist.name
 
@@ -273,7 +276,10 @@ def last_error_line(stderr: str | None) -> str:
     text = (stderr or "").strip()
     if not text:
         return "The request could not be completed."
-    return text.splitlines()[-1]
+    # spotDL and yt-dlp often append progress/debug lines after the useful
+    # exception. Keep the final diagnostic lines for logs and API responses.
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    return " | ".join(lines[-4:])[:1200]
 
 
 def ytdlp_error_message(stderr: str | None, media_url: str = "") -> str:
@@ -473,14 +479,27 @@ def download_media():
                 "--format",
                 "mp3",
                 "--threads",
-                "4",
+                os.environ.get("SPOTDL_THREADS", "2"),
             ]
+            started_at = time.monotonic()
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
             if result.returncode != 0:
                 err = last_error_line(result.stderr) or last_error_line(result.stdout)
-                logger.warning("spotdl download failed for %s: %s", url, err)
+                logger.warning(
+                    "spotdl download failed for %s after %.1fs: %s; stdout=%s",
+                    url,
+                    time.monotonic() - started_at,
+                    err,
+                    last_error_line(result.stdout),
+                )
                 shutil.rmtree(temp_dir, ignore_errors=True)
                 return jsonify({"error": f"Erro no download do Spotify: {err}"}), 400
+
+            logger.info(
+                "spotdl completed %s in %.1fs",
+                url,
+                time.monotonic() - started_at,
+            )
 
             files = glob.glob(str(temp_dir / "*.mp3"))
             if not files:

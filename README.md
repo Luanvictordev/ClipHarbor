@@ -79,6 +79,8 @@ Keep `yt-dlp` updated; YouTube changes frequently.
 
 ClipHarbor integrates [spotDL](https://github.com/spotDL/spotify-downloader) to support Spotify track URLs. When a Spotify track link is entered, ClipHarbor gathers the track metadata (artist, title, cover artwork, and duration) and downloads the matching high-quality audio stream, tagging the output MP3 with the official Spotify artwork and tags.
 
+For Render or another container host, use the included `Dockerfile` (it installs system `ffmpeg`) or configure the service to install `ffmpeg` before starting. spotDL searches for a matching audio source, so cloud network restrictions or source-site changes can still make a track fail. Set `SPOTDL_THREADS` to tune per-download parallelism (default: `2`); raising it can increase memory/CPU usage and may reduce reliability on small instances.
+
 ## Docker
 
 ```bash
