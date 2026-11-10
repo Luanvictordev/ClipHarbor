@@ -10,7 +10,7 @@ Self-hosted media downloader with a Flask UI for batching links, choosing format
 ## Features
 
 - Download media from 1000+ supported sites through [yt-dlp](https://github.com/yt-dlp/yt-dlp)
-- Spotify track downloads with automatic metadata and album artwork via [spotDL](https://github.com/spotDL/spotify-downloader)
+- Spotify track, album and playlist downloads with automatic metadata and album artwork
 - MP4 video downloads and MP3 audio extraction
 - Resolution picker for video downloads
 - Batch URL support with automatic deduplication
@@ -77,11 +77,27 @@ Keep `yt-dlp` updated; YouTube changes frequently.
 
 ### Spotify support
 
-ClipHarbor integrates [spotDL](https://github.com/spotDL/spotify-downloader) to support Spotify track URLs. When a Spotify track link is entered, ClipHarbor gathers the track metadata (artist, title, cover artwork, and duration) and downloads the matching high-quality audio stream, tagging the output MP3 with the official Spotify artwork and tags.
+Spotify serves no downloadable audio, so ClipHarbor reads the track metadata from Spotify's public embed page (artist, title, duration, cover artwork, and the track list for playlists/albums) and then finds the audio on a searchable source, tagging the MP3 with the Spotify artwork and tags.
 
-For Render or another container host, use the included `Dockerfile` (it installs system `ffmpeg`) or configure the service to install `ffmpeg` before starting. spotDL searches for a matching audio source, so cloud network restrictions or source-site changes can still make a track fail. Set `SPOTDL_THREADS` to tune per-download parallelism (default: `2`); raising it can increase memory/CPU usage and may reduce reliability on small instances.
+The audio source is chosen by `SPOTIFY_AUDIO_PROVIDERS` (default `soundcloud,youtube`), tried in order:
 
-On the first Spotify download, ClipHarbor installs spotDL's bundled Deno runtime if the host does not already have Deno. spotDL needs this runtime for some YouTube audio matches; later downloads reuse the installed binary.
+| Provider | Works on a cloud host? | Notes |
+|----------|------------------------|-------|
+| `soundcloud` | **Yes** | Does not block datacenter IPs. Many mainstream tracks only have a 30-second preview or a remix there, so some songs will not be found. |
+| `youtube` | Only with cookies | Best catalog, but blocks anonymous downloads from datacenter IPs (“Sign in to confirm you're not a bot”). Add `YT_DLP_COOKIES_FILE`/`YT_DLP_COOKIES_B64` to use it on a server, or self-host on a home connection. |
+
+The matching step compares the Spotify duration and title with each search hit, so 30-second previews, sped-up/slowed/remix uploads are rejected. When a source fails (for example DRM-protected), the next candidate is tried.
+
+Playlists and albums are downloaded track by track into a ZIP. Tracks that could not be found are listed in `faixas-nao-baixadas.txt` inside the ZIP instead of failing the whole download.
+
+Requirements: `ffmpeg`, which the `Dockerfile` installs system-wide and local installs get through `imageio-ffmpeg`. No Spotify API key, spotDL, or Deno runtime is needed.
+
+### Hosting on Render (Free plan)
+
+- The Free plan gives **512 MB** of RAM, so avoid reintroducing heavy optional dependencies in the request path: spotDL used roughly **165 MB** just by being imported, and one download could push the service into an out-of-memory restart (the log shows `Handling signal: term` right after the download starts, and the browser reports `Download failed`).
+- `Procfile` uses a **900 s** gunicorn timeout so multi-track playlists can finish.
+- `ffmpeg` comes from `imageio-ffmpeg`; the Python runtime does not need apt packages. If you deploy the `Dockerfile` instead, system `ffmpeg` is already installed.
+- A Free web service spins down after 15 idle minutes and takes about a minute to wake, so the first download after idle is slower.
 
 ## Docker
 
@@ -101,7 +117,8 @@ docker run -p 8899:8899 clipharbor
 
 - Backend: Python + Flask
 - Frontend: Vanilla HTML, CSS, and JavaScript
-- Download engine: yt-dlp + ffmpeg provided through `imageio-ffmpeg`
+- Download engine: yt-dlp + ffmpeg (system binary or `imageio-ffmpeg`)
+- Spotify metadata: public Spotify embed payload (no API key)
 
 ## Disclaimer
 

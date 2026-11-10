@@ -3,5 +3,4 @@ flask-limiter>=3.5.0
 yt-dlp>=2025.10.1
 imageio-ffmpeg>=0.4.9
 gunicorn>=21.2.0
-spotdl>=4.6.0
 vercel_blob==0.4.2

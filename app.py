@@ -4,12 +4,13 @@ import glob
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
-import threading
 import time
+import urllib.request
 import uuid
 import zipfile
 from contextlib import contextmanager
@@ -32,32 +33,6 @@ logging.basicConfig(
     format="%(asctime)s [%(levelname)s] %(message)s",
 )
 logger = logging.getLogger(__name__)
-
-_spotdl_deno_lock = threading.Lock()
-
-
-def ensure_spotdl_deno() -> None:
-    """Install spotDL's bundled Deno runtime on hosts without system Deno."""
-    from spotdl.utils.deno import is_deno_installed
-
-    if is_deno_installed():
-        return
-
-    with _spotdl_deno_lock:
-        if is_deno_installed():
-            return
-        logger.info("Deno is missing; installing the spotDL-bundled runtime")
-        result = subprocess.run(
-            [sys.executable, "-m", "spotdl", "--download-deno"],
-            capture_output=True,
-            text=True,
-            timeout=180,
-        )
-        if result.returncode != 0 or not is_deno_installed():
-            details = last_error_line(result.stderr if result.stderr.strip() else result.stdout)
-            logger.error("Could not install Deno for spotDL: %s", details)
-            raise RuntimeError(f"Não foi possível preparar o Deno para baixar do YouTube: {details}")
-        logger.info("spotDL-bundled Deno runtime installed")
 
 # ---------------------------------------------------------------------------
 # App setup
@@ -116,120 +91,98 @@ def is_spotify_playlist_url(url: str) -> bool:
     return False
 
 
-_spotify_client_initialized = False
+SPOTIFY_EMBED_PAGE = "https://open.spotify.com/embed/{kind}/{spotify_id}"
+SPOTIFY_LINK_REF = re.compile(r"/(track|playlist|album)/([A-Za-z0-9]+)")
 
 
-def ensure_spotify_client():
-    global _spotify_client_initialized
-    if not _spotify_client_initialized:
-        try:
-            from spotdl.utils.spotify import SpotifyClient
+def spotify_link_ref(url: str) -> tuple[str, str]:
+    match = SPOTIFY_LINK_REF.search(urlparse(url).path)
+    if not match:
+        raise RuntimeError(
+            "Link do Spotify não reconhecido. Use o link de uma faixa, álbum ou playlist."
+        )
+    return match.group(1), match.group(2)
 
-            SpotifyClient.init("", "")
-            _spotify_client_initialized = True
-        except Exception as exc:
-            logger.warning("Could not initialize SpotifyClient: %s", exc)
+
+def fetch_spotify_entity(url: str) -> dict:
+    """Read Spotify's public embed page payload.
+
+    It carries the track metadata (name, artists, duration, cover) and, for
+    playlists/albums, the track list — with no API keys, no spotDL and no
+    heavyweight Python dependencies.
+    """
+    kind, spotify_id = spotify_link_ref(url)
+    request_obj = urllib.request.Request(
+        SPOTIFY_EMBED_PAGE.format(kind=kind, spotify_id=spotify_id),
+        headers={"User-Agent": "Mozilla/5.0"},
+    )
+    with urllib.request.urlopen(request_obj, timeout=20) as response:
+        page = response.read().decode("utf-8", "replace")
+
+    match = re.search(
+        r'<script id="__NEXT_DATA__" type="application/json">(.*?)</script>', page, re.S
+    )
+    if not match:
+        raise RuntimeError("O Spotify não devolveu os metadados deste link.")
+
+    try:
+        return json.loads(match.group(1))["props"]["pageProps"]["state"]["data"]["entity"]
+    except (KeyError, TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("Não consegui ler os metadados do Spotify para este link.") from exc
+
+
+def spotify_cover_url(entity: dict) -> str:
+    sources = (entity.get("coverArt") or {}).get("sources") or []
+    images = (entity.get("visualIdentity") or {}).get("image") or []
+    candidates = [
+        (item.get("width") or item.get("maxWidth") or 0, item.get("url"))
+        for item in [*sources, *images]
+    ]
+    candidates = [(size, link) for size, link in candidates if link]
+    if not candidates:
+        return ""
+    return max(candidates, key=lambda item: item[0])[1]
+
+
+def spotify_track_info(track: dict, fallback_cover: str = "") -> dict:
+    """Normalize a track from a Spotify embed payload."""
+    name = (track.get("title") or track.get("name") or "").strip() or "Spotify Track"
+    artists_list = track.get("artists") or []
+    artists = track.get("subtitle") or ", ".join(
+        artist.get("name", "") for artist in artists_list if artist.get("name")
+    )
+    artists = artists.strip()
+    duration_ms = track.get("duration") or 0
+    track_id = str(track.get("uri") or "").rsplit(":", 1)[-1]
+    return {
+        "url": f"https://open.spotify.com/track/{track_id}" if track_id else "",
+        "title": f"{artists} - {name}" if artists else name,
+        "thumbnail": fallback_cover,
+        "duration": round(duration_ms / 1000) if duration_ms else None,
+        "uploader": artists or "Spotify",
+        "formats": [{"id": "mp3", "label": "MP3 Audio", "height": 0}],
+    }
 
 
 def get_spotify_track_info(url: str) -> dict:
-    ensure_spotify_client()
-    try:
-        from spotdl.types.song import Song
-
-        song = Song.from_url(url)
-        artists = ", ".join(song.artists) if song.artists else ""
-        title = f"{artists} - {song.name}" if artists else song.name
-        return {
-            "title": title,
-            "thumbnail": song.cover_url or "",
-            "duration": song.duration,
-            "uploader": artists or "Spotify",
-            "formats": [
-                {"id": "mp3", "label": "MP3 Audio (320kbps)", "height": 0}
-            ],
-        }
-    except Exception as exc:
-        logger.warning("spotdl metadata failed for %s (%s); trying oEmbed fallback", url, exc)
-        import urllib.request
-
-        req = urllib.request.Request(
-            f"https://open.spotify.com/oembed?url={url}",
-            headers={"User-Agent": "Mozilla/5.0"},
-        )
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-        title = data.get("title") or "Spotify Track"
-        thumb = data.get("thumbnail_url") or ""
-        return {
-            "title": title,
-            "thumbnail": thumb,
-            "duration": None,
-            "uploader": "Spotify",
-            "formats": [
-                {"id": "mp3", "label": "MP3 Audio (320kbps)", "height": 0}
-            ],
-        }
+    entity = fetch_spotify_entity(url)
+    return spotify_track_info(entity, spotify_cover_url(entity))
 
 
 def get_spotify_info(url: str) -> dict:
-    ensure_spotify_client()
     if is_spotify_playlist_url(url):
-        try:
-            if "/album/" in url.lower():
-                from spotdl.types.album import Album
-
-                # We render each track as a separate downloadable card, so the
-                # album lookup must actually fetch its songs.
-                album = Album.from_url(url, fetch_songs=True)
-                songs = album.songs
-                name = album.name
-            else:
-                from spotdl.types.playlist import Playlist
-
-                playlist = Playlist.from_url(url, fetch_songs=True)
-                songs = playlist.songs
-                name = playlist.name
-
-            tracks = []
-            for s in songs:
-                artists = ", ".join(s.artists) if s.artists else ""
-                title = f"{artists} - {s.name}" if artists else s.name
-                tracks.append(
-                    {
-                        "url": s.url,
-                        "title": title,
-                        "thumbnail": s.cover_url or "",
-                        "duration": s.duration,
-                        "uploader": artists or "Spotify",
-                        "formats": [
-                            {"id": "mp3", "label": "MP3 Audio (320kbps)", "height": 0}
-                        ],
-                    }
-                )
-
-            return {
-                "is_playlist": True,
-                "title": name,
-                "track_count": len(tracks),
-                "tracks": tracks,
-            }
-        except Exception as exc:
-            logger.warning("spotdl playlist lookup failed for %s (%s); trying oEmbed fallback", url, exc)
-            import urllib.request
-
-            req = urllib.request.Request(
-                f"https://open.spotify.com/oembed?url={url}",
-                headers={"User-Agent": "Mozilla/5.0"},
-            )
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode())
-            return {
-                "is_playlist": True,
-                "title": data.get("title") or "Spotify Playlist",
-                "track_count": 0,
-                "tracks": [],
-                "thumbnail": data.get("thumbnail_url") or "",
-            }
+        entity = fetch_spotify_entity(url)
+        cover = spotify_cover_url(entity)
+        tracks = [
+            spotify_track_info(track, cover) for track in (entity.get("trackList") or [])
+        ]
+        return {
+            "is_playlist": True,
+            "title": entity.get("name") or "Spotify Playlist",
+            "track_count": len(tracks),
+            "tracks": tracks,
+            "thumbnail": cover,
+        }
 
     return get_spotify_track_info(url)
 
@@ -300,7 +253,7 @@ def last_error_line(stderr: str | None) -> str:
     text = (stderr or "").strip()
     if not text:
         return "The request could not be completed."
-    # spotDL and yt-dlp often append progress/debug lines after the useful
+    # yt-dlp often appends progress/debug lines after the useful
     # exception. Keep the final diagnostic lines for logs and API responses.
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     return " | ".join(lines[-4:])[:1200]
@@ -327,6 +280,292 @@ def ytdlp_error_message(stderr: str | None, media_url: str = "") -> str:
             "YT_DLP_COOKIES_B64. See https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp"
         )
     return " ".join(parts)
+
+
+# ---------------------------------------------------------------------------
+# Spotify audio lookup
+#
+# Spotify itself serves no downloadable audio, so the audio comes from a
+# searchable source. YouTube is the usual choice, but it blocks anonymous
+# downloads from datacenter IPs (Render included) with "Sign in to confirm
+# you're not a bot". SoundCloud does not, so it is tried first by default.
+# Change the order/selection with SPOTIFY_AUDIO_PROVIDERS.
+# ---------------------------------------------------------------------------
+SPOTIFY_AUDIO_SEARCH_PREFIX = {"soundcloud": "scsearch", "youtube": "ytsearch"}
+
+# Re-uploads with these words are almost never the track the user asked for.
+SPOTIFY_AUDIO_NOISE_WORDS = (
+    "slowed",
+    "slower",
+    "sped up",
+    "speed up",
+    "faster",
+    "reverb",
+    "nightcore",
+    "remix",
+    "cover",
+    "instrumental",
+    "karaoke",
+    "8d audio",
+    "bass boost",
+    "mashup",
+    "live",
+)
+
+
+def spotify_audio_providers() -> list[str]:
+    raw = (os.environ.get("SPOTIFY_AUDIO_PROVIDERS") or "soundcloud,youtube").strip()
+    providers = [item.strip().lower() for item in raw.split(",") if item.strip()]
+    known = [p for p in providers if p in SPOTIFY_AUDIO_SEARCH_PREFIX]
+    return known or ["soundcloud", "youtube"]
+
+
+def yt_dlp_search(query: str) -> list[dict]:
+    """Run a yt-dlp search and return its result entries."""
+    with yt_dlp_cookies_context() as ck:
+        command = yt_dlp_command("", "--flat-playlist", "-j", query, cookies_path=ck)
+        result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+
+    entries: list[dict] = []
+    for line in (result.stdout or "").splitlines():
+        line = line.strip()
+        if not line.startswith("{"):
+            continue
+        try:
+            data = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if data.get("webpage_url"):
+            entries.append(data)
+
+    if not entries and result.returncode != 0:
+        raise RuntimeError(last_error_line(result.stderr) or last_error_line(result.stdout))
+    return entries
+
+
+def rank_audio_candidates(entries: list[dict], expected_duration, query: str) -> list[dict]:
+    """Order the search hits by how well they match the Spotify track."""
+    tokens = {t for t in re.split(r"[^a-z0-9]+", query.lower()) if len(t) > 2}
+    scored: list[tuple[float, dict]] = []
+    for position, entry in enumerate(entries):
+        duration = entry.get("duration")
+        score = position * 0.5
+        if isinstance(duration, (int, float)) and duration > 0:
+            if expected_duration:
+                difference = abs(duration - float(expected_duration))
+                # Spotify's duration and the upload rarely match exactly, but a
+                # 30s preview or a different edit should never win.
+                if difference > max(20.0, float(expected_duration) * 0.15):
+                    continue
+                score += difference
+            if duration < 45 and (expected_duration or 0) > 60:
+                continue
+        title = (entry.get("title") or "").lower()
+        title_tokens = {t for t in re.split(r"[^a-z0-9]+", title) if len(t) > 2}
+        if any(word in title and word not in query.lower() for word in SPOTIFY_AUDIO_NOISE_WORDS):
+            continue
+        score -= 3.0 * len(tokens & title_tokens)
+        # Extra words ("instrumental", "from the movie ...") mean a different audio.
+        score += 2.5 * len(title_tokens - tokens)
+        scored.append((score, entry))
+
+    scored.sort(key=lambda item: item[0])
+    return [entry for _, entry in scored]
+
+
+def find_spotify_audio_candidates(title: str, duration) -> list[tuple[str, str]]:
+    """Return ranked (media_url, provider) options for a Spotify track title."""
+    candidates: list[tuple[str, str]] = []
+    problems: list[str] = []
+    for provider in spotify_audio_providers():
+        prefix = SPOTIFY_AUDIO_SEARCH_PREFIX[provider]
+        try:
+            entries = yt_dlp_search(f"{prefix}6:{title}")
+        except subprocess.TimeoutExpired:
+            problems.append(f"{provider}: tempo esgotado na busca")
+            continue
+        except Exception as exc:
+            problems.append(f"{provider}: {exc}")
+            continue
+
+        ranked = rank_audio_candidates(entries, duration, title)
+        if not ranked:
+            problems.append(f"{provider}: nenhum resultado compatível")
+            continue
+        candidates.extend((entry["webpage_url"], provider) for entry in ranked[:2])
+
+    if not candidates:
+        detail = " | ".join(problems) or "nenhum provedor configurado"
+        raise RuntimeError(f"Não encontrei o áudio desta faixa do Spotify ({detail}).")
+    return candidates[:3]
+
+
+def download_audio_file(media_url: str, output_template: str, ffmpeg_path: str) -> str:
+    """Download media_url as MP3 and return the produced file path."""
+    with yt_dlp_cookies_context() as ck:
+        command = yt_dlp_command(
+            media_url,
+            "-x",
+            "--audio-format",
+            "mp3",
+            "--audio-quality",
+            "0",
+            "--no-progress",
+            "-o",
+            output_template,
+            "--ffmpeg-location",
+            ffmpeg_path,
+            media_url,
+            cookies_path=ck,
+        )
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+
+    if result.returncode != 0:
+        raise RuntimeError(last_error_line(result.stderr) or last_error_line(result.stdout))
+
+    produced = sorted(glob.glob(str(Path(output_template).parent / "*.mp3")))
+    if not produced:
+        raise RuntimeError("o download terminou sem gerar um MP3")
+    return produced[0]
+
+
+def fetch_cover_art(cover_url: str, destination_dir: Path) -> Path | None:
+    if not cover_url:
+        return None
+
+    try:
+        req = urllib.request.Request(cover_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=20) as resp:
+            data = resp.read()
+        cover_path = destination_dir / "cover.jpg"
+        cover_path.write_bytes(data)
+        return cover_path if data else None
+    except Exception as exc:
+        logger.warning("Could not fetch Spotify cover art %s: %s", cover_url, exc)
+        return None
+
+
+def split_spotify_title(title: str) -> tuple[str, str]:
+    """Split the "Artist - Track" convention into (artist, track)."""
+    if " - " in title:
+        artist, name = title.split(" - ", 1)
+        return artist.strip(), name.strip()
+    return "", title.strip()
+
+
+def tag_spotify_audio(audio_path: str, title: str, album: str, cover_url: str, ffmpeg_path: str) -> str:
+    """Write Spotify tags and artwork into the downloaded MP3 (ffmpeg only, no ffprobe)."""
+    source = Path(audio_path)
+    artist, name = split_spotify_title(title)
+    cover_path = fetch_cover_art(cover_url, source.parent)
+    tagged = source.with_name(f"{sanitize_filename(title, 'spotify-track')}.mp3")
+
+    command = [ffmpeg_path, "-y", "-loglevel", "error", "-i", str(source)]
+    if cover_path:
+        command += [
+            "-i",
+            str(cover_path),
+            "-map",
+            "0:a",
+            "-map",
+            "1:v",
+            "-c:v",
+            "mjpeg",
+            "-id3v2_version",
+            "3",
+            "-metadata:s:v",
+            "title=Album cover",
+            "-metadata:s:v",
+            "comment=Cover (front)",
+        ]
+    else:
+        command += ["-map", "0:a"]
+    command += ["-c:a", "copy", "-metadata", f"title={name}"]
+    if artist:
+        command += ["-metadata", f"artist={artist}"]
+    if album:
+        command += ["-metadata", f"album={album}"]
+    command.append(str(tagged))
+
+    try:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        logger.warning("Timed out tagging %s; keeping the untagged file", source.name)
+        return audio_path
+
+    if result.returncode != 0 or not tagged.is_file():
+        logger.warning("ffmpeg could not tag %s: %s", source.name, last_error_line(result.stderr))
+        return audio_path
+
+    try:
+        source.unlink()
+    except OSError:
+        pass
+    return str(tagged)
+
+
+def download_spotify_track(
+    title: str, duration, cover_url: str, album: str, track_dir: Path, ffmpeg_path: str
+) -> str:
+    """Resolve a Spotify track to an audio source, download it and tag the MP3."""
+    track_dir.mkdir(parents=True, exist_ok=True)
+    failures: list[str] = []
+    for media_url, provider in find_spotify_audio_candidates(title, duration):
+        logger.info("Spotify track %r resolved via %s: %s", title, provider, media_url)
+        try:
+            audio_path = download_audio_file(
+                media_url, str(track_dir / "source.%(ext)s"), ffmpeg_path
+            )
+        except subprocess.TimeoutExpired:
+            raise
+        except Exception as exc:
+            # A single hit can be DRM protected or region locked; try the next one.
+            logger.warning("Audio source %s failed for %r: %s", media_url, title, exc)
+            failures.append(f"{provider}: {exc}")
+            for leftover in track_dir.glob("source.*"):
+                try:
+                    leftover.unlink()
+                except OSError:
+                    pass
+            continue
+        return tag_spotify_audio(audio_path, title, album, cover_url, ffmpeg_path)
+
+    detail = " | ".join(failures) or "nenhuma fonte de áudio disponível"
+    raise RuntimeError(f"Nenhuma fonte de áudio funcionou para esta faixa ({detail}).")
+
+
+def spotify_download_targets(url: str) -> tuple[list[dict], str | None]:
+    """Return ([{title, duration, cover, album}], playlist_title)."""
+    info = get_spotify_info(url)
+    if info.get("is_playlist"):
+        tracks = info.get("tracks") or []
+        if not tracks:
+            raise RuntimeError(
+                "Não consegui listar as faixas deste playlist/álbum do Spotify. Tente o link de uma faixa."
+            )
+        album = info.get("title") or ""
+        targets = [
+            {
+                "title": track.get("title") or "",
+                "duration": track.get("duration"),
+                "cover": track.get("thumbnail") or "",
+                "album": album,
+            }
+            for track in tracks
+        ]
+        return targets, info.get("title")
+
+    return (
+        [
+            {
+                "title": info.get("title") or "",
+                "duration": info.get("duration"),
+                "cover": info.get("thumbnail") or "",
+                "album": "",
+            }
+        ],
+        None,
+    )
 
 
 def sanitize_filename(value: str, fallback: str) -> str:
@@ -493,63 +732,53 @@ def download_media():
         ffmpeg_path = get_ffmpeg_location()
         logger.info("Downloading Spotify track %s into %s", url, temp_dir)
         try:
-            ensure_spotdl_deno()
-            cmd = [
-                sys.executable,
-                "-m",
-                "spotdl",
-                "download",
-                url,
-                "--output",
-                str(temp_dir / "{artists} - {title}.{output-ext}"),
-                "--ffmpeg",
-                ffmpeg_path,
-                "--format",
-                "mp3",
-                "--threads",
-                os.environ.get("SPOTDL_THREADS", "2"),
-            ]
             started_at = time.monotonic()
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
-            if result.returncode != 0:
-                err = last_error_line(result.stderr) or last_error_line(result.stdout)
-                logger.warning(
-                    "spotdl download failed for %s after %.1fs: %s; stdout=%s",
-                    url,
-                    time.monotonic() - started_at,
-                    err,
-                    last_error_line(result.stdout),
-                )
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return jsonify({"error": f"Erro no download do Spotify: {err}"}), 400
+            targets, playlist_title = spotify_download_targets(url)
+            logger.info("Spotify %s resolved to %d track(s)", url, len(targets))
 
-            logger.info(
-                "spotdl completed %s in %.1fs",
-                url,
-                time.monotonic() - started_at,
-            )
+            files: list[str] = []
+            failed_tracks: list[str] = []
+            for index, target in enumerate(targets, start=1):
+                track_title = target["title"]
+                logger.info("Spotify track %d/%d: %s", index, len(targets), track_title)
+                try:
+                    files.append(
+                        download_spotify_track(
+                            track_title,
+                            target.get("duration"),
+                            target.get("cover") or "",
+                            target.get("album") or "",
+                            temp_dir / f"track-{index:02d}",
+                            ffmpeg_path,
+                        )
+                    )
+                except subprocess.TimeoutExpired:
+                    raise
+                except Exception as exc:
+                    logger.warning("Spotify track %r failed: %s", track_title, exc)
+                    if len(targets) == 1:
+                        raise RuntimeError(f"Erro no download do Spotify: {exc}") from exc
+                    # Playlists keep going: one unavailable song should not
+                    # throw away the tracks that did download.
+                    failed_tracks.append(f"{index}. {track_title} - {exc}")
 
-            files = glob.glob(str(temp_dir / "**" / "*.mp3"), recursive=True)
+            logger.info("Spotify download finished for %s in %.1fs", url, time.monotonic() - started_at)
+
             if not files:
-                produced = [str(path.relative_to(temp_dir)) for path in temp_dir.rglob("*") if path.is_file()]
-                logger.error(
-                    "spotdl returned success but produced no MP3 for %s; files=%s; stdout=%s; stderr=%s",
-                    url,
-                    produced[:20],
-                    last_error_line(result.stdout),
-                    last_error_line(result.stderr),
-                )
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                return jsonify({"error": "spotDL terminou sem gerar o MP3. Consulte os logs do serviço para ver a saída do spotDL."}), 500
+                raise RuntimeError("Nenhuma faixa deste playlist/álbum pôde ser baixada.")
 
             if len(files) > 1 or is_spotify_playlist_url(url):
-                zip_base = sanitize_filename(title or "spotify_playlist", "playlist")
+                zip_base = sanitize_filename(title or playlist_title or "spotify_playlist", "playlist")
                 zip_filename = f"{zip_base}.zip"
                 zip_filepath = str(temp_dir / zip_filename)
                 with zipfile.ZipFile(zip_filepath, "w", zipfile.ZIP_DEFLATED) as zf:
                     for f in files:
                         if f != zip_filepath:
                             zf.write(f, arcname=Path(f).name)
+                    if failed_tracks:
+                        report = temp_dir / "faixas-nao-baixadas.txt"
+                        report.write_text("\n".join(failed_tracks), encoding="utf-8")
+                        zf.write(report, arcname=report.name)
                 chosen_file = zip_filepath
                 filename = zip_filename
             else:
@@ -588,6 +817,10 @@ def download_media():
             logger.error("Timeout downloading Spotify URL: %s", url)
             shutil.rmtree(temp_dir, ignore_errors=True)
             return jsonify({"error": "Download do Spotify expirou (tempo limite excedido)."}), 400
+        except RuntimeError as exc:
+            logger.warning("Spotify download failed for %s: %s", url, exc)
+            shutil.rmtree(temp_dir, ignore_errors=True)
+            return jsonify({"error": str(exc)}), 400
         except Exception as exc:
             logger.exception("Unexpected error downloading Spotify URL: %s", url)
             shutil.rmtree(temp_dir, ignore_errors=True)
