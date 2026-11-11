@@ -48,7 +48,7 @@ Encryption, which yt-dlp cannot decrypt.
 
 ## Limitations
 
-- First run needs internet to fetch `yt-dlp` (~17 MB) and `ffmpeg` (~40 MB
+- First run needs internet to fetch `yt-dlp` (~17 MB) and `ffmpeg` (~100 MB
   compressed).
 - YouTube can still rate-limit (`HTTP 429`) after many downloads in a row.
 - Tracks without a matching upload are listed in `faixas-nao-baixadas.txt` in
