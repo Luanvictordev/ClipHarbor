@@ -87,3 +87,10 @@ cargo run -- --cli "https://open.spotify.com/track/5XeFesFbtLpXzIVDNQP22n" /tmp/
 Environment overrides: `CLIPHARBOR_YTDLP`, `CLIPHARBOR_FFMPEG`,
 `CLIPHARBOR_BIN_DIR`, `CLIPHARBOR_COOKIES` and `CLIPHARBOR_COOKIES_FILE`
 (CLI only).
+
+`--check-layout` renders the window headlessly and reports whether the content
+fits the default size — useful on a box without a display server (CI, SSH):
+
+```bash
+cargo run -- --check-layout
+```

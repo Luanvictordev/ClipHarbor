@@ -52,10 +52,14 @@ fn main() -> eframe::Result<()> {
         return run_cli(&url, &folder);
     }
 
+    if args.iter().any(|arg| arg == "--check-layout") {
+        return check_layout();
+    }
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([880.0, 700.0])
-            .with_min_inner_size([640.0, 520.0])
+            .with_inner_size([900.0, 780.0])
+            .with_min_inner_size([640.0, 560.0])
             .with_title("ClipHarbor"),
         ..Default::default()
     };
@@ -352,16 +356,17 @@ impl App {
 
             ui.add_space(10.0);
             theme::section(ui, "Salvar em");
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if theme::button(ui, "Abrir pasta", theme::Kind::Ghost).clicked() {
-                    open_folder(self.folder.trim());
-                }
+            ui.horizontal(|ui| {
+                let button_width = 104.0;
                 ui.add_sized(
-                    [ui.available_width(), 32.0],
+                    [(ui.available_width() - button_width - 8.0).max(160.0), 32.0],
                     egui::TextEdit::singleline(&mut self.folder)
                         .margin(egui::Margin::symmetric(10.0, 7.0))
                         .font(egui::FontId::new(14.0, egui::FontFamily::Proportional)),
                 );
+                if theme::button(ui, "Abrir pasta", theme::Kind::Ghost).clicked() {
+                    open_folder(self.folder.trim());
+                }
             });
 
             ui.add_space(10.0);
@@ -530,7 +535,7 @@ impl App {
                 .inner_margin(egui::Margin::symmetric(12.0, 10.0))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
-                        .max_height(190.0)
+                        .max_height(170.0)
                         .auto_shrink([false, false])
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
@@ -560,9 +565,11 @@ impl App {
     }
 }
 
-impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl App {
+    /// The whole window; returns the content height for `--check-layout`.
+    fn draw(&mut self, ctx: &egui::Context) -> f32 {
         self.poll();
+        let mut content = 0.0;
 
         egui::CentralPanel::default()
             .frame(
@@ -571,13 +578,80 @@ impl eframe::App for App {
                     .inner_margin(egui::Margin::symmetric(22.0, 20.0)),
             )
             .show(ctx, |ui| {
-                self.header(ui);
-                ui.add_space(14.0);
-                self.form(ui);
-                ui.add_space(10.0);
-                self.progress_card(ui);
-                ui.add_space(10.0);
-                self.log_card(ui);
+                // A shorter window scrolls instead of clipping the log away.
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        self.header(ui);
+                        ui.add_space(14.0);
+                        self.form(ui);
+                        ui.add_space(10.0);
+                        self.progress_card(ui);
+                        ui.add_space(10.0);
+                        self.log_card(ui);
+                        content = ui.min_rect().bottom();
+                    });
             });
+        content
     }
+}
+
+impl eframe::App for App {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.draw(ctx);
+    }
+}
+
+/// Layout smoke test that needs no display server: the window is rendered to
+/// shapes and the geometry is checked against the visible area.
+fn check_layout() -> eframe::Result<()> {
+    let size = egui::vec2(900.0, 780.0);
+    let ctx = egui::Context::default();
+    theme::apply(&ctx);
+
+    let mut app = App::new();
+    app.url = "https://open.spotify.com/album/1hwPP3qgnV7PQrMSy6qFw8".to_string();
+    app.push(Level::Info, "Preparando yt-dlp e ffmpeg...");
+    app.push(
+        Level::Ok,
+        "A Flock Of Seagulls - I Ran (So Far Away).mp3 salvo",
+    );
+    app.push(
+        Level::Warn,
+        "Sem cookies: Chrome/Edge no Windows cifram os cookies com App-Bound \
+         Encryption e o yt-dlp não consegue decifrá-los (yt-dlp#10927). Seguindo sem \
+         sessão; se o YouTube pedir login, use Firefox (instalado e logado) ou um cookies.txt.",
+    );
+    app.progress = 0.42;
+    app.track = Some((4, 10, "A Flock Of Seagulls - Don't Ask Me".to_string()));
+    app.files = 3;
+    app.phase = Phase::Running;
+
+    let raw = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+        time: Some(0.0),
+        ..Default::default()
+    };
+
+    let mut content = 0.0;
+    for pass in 1..=2 {
+        let output = ctx.run(raw.clone(), |ctx| {
+            content = app.draw(ctx);
+        });
+        println!(
+            "passo {pass}: {:.0} x {:.0} de conteúdo (janela {:.0} x {:.0}), {} primitivas",
+            size.x,
+            content,
+            size.x,
+            size.y,
+            ctx.tessellate(output.shapes, output.pixels_per_point).len()
+        );
+    }
+
+    let exceeded = content > size.y - 16.0;
+    if exceeded {
+        eprintln!("layout maior que a janela");
+        std::process::exit(1);
+    }
+    Ok(())
 }
