@@ -64,11 +64,22 @@ fn execute(
     let exe = deps::ensure_ytdlp(|line| log(tx, notify, line))?;
     let ffmpeg = deps::ensure_ffmpeg(|line| log(tx, notify, line))?;
 
-    let ytdlp = YtDlp {
-        exe,
-        ffmpeg,
-        cookies: cookies.filter(|value| !value.trim().is_empty()),
-    };
+    let mut cookies = cookies.filter(|value| !value.trim().is_empty());
+    if let Some(browser) = cookies.as_deref() {
+        if !deps::installed_browsers().contains(&browser) {
+            log(
+                tx,
+                notify,
+                format!(
+                    "Aviso: não encontrei cookies do {browser} neste PC (navegador não instalado \
+                     ou sem perfil). Vou tentar sem cookies."
+                ),
+            );
+            cookies = None;
+        }
+    }
+
+    let ytdlp = YtDlp::new(exe, ffmpeg, cookies);
 
     if spotify::is_spotify_url(url) {
         return download_spotify(&ytdlp, url, out_dir, tx, notify);
@@ -104,7 +115,11 @@ fn newest_file(dir: &Path, extensions: &[&str]) -> Option<PathBuf> {
             .metadata()
             .and_then(|meta| meta.modified())
             .unwrap_or(std::time::UNIX_EPOCH);
-        if best.as_ref().map(|(when, _)| modified > *when).unwrap_or(true) {
+        if best
+            .as_ref()
+            .map(|(when, _)| modified > *when)
+            .unwrap_or(true)
+        {
             best = Some((modified, path));
         }
     }
@@ -144,7 +159,9 @@ fn fetch_cover(url: &str, dir: &Path) -> Option<PathBuf> {
         return None;
     }
     let destination = dir.join("cover.jpg");
-    deps::curl_download(url, &destination).ok().map(|_| destination)
+    deps::curl_download(url, &destination)
+        .ok()
+        .map(|_| destination)
 }
 
 fn download_spotify(
@@ -157,11 +174,7 @@ fn download_spotify(
     log(tx, notify, "Lendo os metadados do Spotify...");
     let entity = spotify::fetch(url)?;
     let total = entity.tracks.len();
-    log(
-        tx,
-        notify,
-        format!("{} — {total} faixa(s)", entity.name),
-    );
+    log(tx, notify, format!("{} — {total} faixa(s)", entity.name));
 
     let temp = temporary_dir();
     std::fs::create_dir_all(&temp).map_err(|err| format!("{err}"))?;
@@ -178,7 +191,10 @@ fn download_spotify(
                 log(
                     tx,
                     notify,
-                    format!("    salvo: {}", path.file_name().unwrap_or_default().to_string_lossy()),
+                    format!(
+                        "    salvo: {}",
+                        path.file_name().unwrap_or_default().to_string_lossy()
+                    ),
                 );
                 outcome.files.push(path);
             }
@@ -205,7 +221,11 @@ fn download_spotify(
         log(
             tx,
             notify,
-            format!("{} faixa(s) sem fonte. Lista em {}", outcome.failures.len(), report.display()),
+            format!(
+                "{} faixa(s) sem fonte. Lista em {}",
+                outcome.failures.len(),
+                report.display()
+            ),
         );
     }
 
@@ -213,6 +233,23 @@ fn download_spotify(
         return Err("Nenhuma faixa pôde ser baixada.".to_string());
     }
     Ok(outcome)
+}
+
+/// Report, once, that the browser cookies could not be read.
+///
+/// yt-dlp already retried without them; this only keeps the user from
+/// wondering why the session was ignored.
+fn flush_cookie_problem(ytdlp: &YtDlp, tx: &Sender<Event>, notify: &impl Fn()) {
+    if let Some(problem) = ytdlp.take_cookie_problem() {
+        log(
+            tx,
+            notify,
+            format!(
+                "Aviso: os cookies do navegador não puderam ser lidos ({problem}). \
+                 Seguindo sem cookies; se o YouTube exigir login, feche o navegador e tente de novo."
+            ),
+        );
+    }
 }
 
 fn download_track(
@@ -223,12 +260,16 @@ fn download_track(
     tx: &Sender<Event>,
     notify: &impl Fn(),
 ) -> Result<PathBuf, String> {
-    let candidates = ytdlp::find_candidates(ytdlp, &track.title, track.duration)?;
+    let candidates = ytdlp::find_candidates(ytdlp, &track.title, track.duration);
+    flush_cookie_problem(ytdlp, tx, notify);
+    let candidates = candidates?;
     let mut last_error = String::from("nenhum candidato");
 
     for (index, candidate) in candidates.iter().enumerate() {
         let template = temp.join(format!("track-{index}.%(ext)s"));
-        match ytdlp.download_audio(&ytdlp::media_url(candidate), &template) {
+        let attempt = ytdlp.download_audio(&ytdlp::media_url(candidate), &template);
+        flush_cookie_problem(ytdlp, tx, notify);
+        match attempt {
             Ok(()) => {
                 let produced = newest_file(temp, &["mp3"])
                     .ok_or_else(|| "o download terminou sem gerar um MP3".to_string())?;
@@ -245,7 +286,11 @@ fn download_track(
                 return Ok(destination);
             }
             Err(err) => {
-                log(tx, notify, format!("    {}: {err}", short_source(&ytdlp::media_url(candidate))));
+                log(
+                    tx,
+                    notify,
+                    format!("    {}: {err}", short_source(&ytdlp::media_url(candidate))),
+                );
                 last_error = err;
             }
         }

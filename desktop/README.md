@@ -46,6 +46,12 @@ Brave, Chromium) and `yt-dlp` reads its cookies directly — nothing to export.
 On Windows, prefer **Firefox**: Chrome 127+ encrypts cookies with App-Bound
 Encryption, which yt-dlp cannot decrypt.
 
+Only browsers with a profile on this machine are listed, and if the cookies
+still cannot be read (browser closed while its database is locked, empty
+profile, undecryptable store) the app says so and continues without cookies
+instead of failing every track. Firefox installed from the Microsoft Store is
+detected too; for other portable installs, pick another browser or `nenhum`.
+
 ## Limitations
 
 - First run needs internet to fetch `yt-dlp` (~17 MB) and `ffmpeg` (~100 MB

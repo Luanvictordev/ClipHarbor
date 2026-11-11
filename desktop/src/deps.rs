@@ -61,6 +61,73 @@ pub fn find_tool(tool: &str, env_var: &str) -> Option<PathBuf> {
     None
 }
 
+/// Browsers with a profile on this machine, as the names yt-dlp understands.
+///
+/// Asking yt-dlp for the cookies of a browser that is not installed makes it
+/// abort before searching anything, so the choice is validated against this
+/// list instead of being trusted blindly.
+pub fn installed_browsers() -> Vec<&'static str> {
+    let mut found: Vec<&'static str> = Vec::new();
+    let mut add = |name: &'static str, paths: Vec<Option<PathBuf>>| {
+        if paths.into_iter().flatten().any(|path| path.is_dir()) {
+            found.push(name);
+        }
+    };
+
+    #[cfg(windows)]
+    {
+        let roaming = std::env::var_os("APPDATA").map(PathBuf::from);
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from);
+        let in_roaming = |tail: &str| roaming.as_ref().map(|base| base.join(tail));
+        let in_local = |tail: &str| local.as_ref().map(|base| base.join(tail));
+
+        add(
+            "firefox",
+            vec![
+                in_roaming("Mozilla\\Firefox\\Profiles"),
+                // Firefox installed from the Microsoft Store keeps them here.
+                in_local(
+                    "Packages\\Mozilla.Firefox_n80bbvh6b1yt2\\LocalCache\\Roaming\\Mozilla\\Firefox\\Profiles",
+                ),
+            ],
+        );
+        add(
+            "chrome",
+            vec![in_local("Google\\Chrome\\User Data\\Default")],
+        );
+        add(
+            "edge",
+            vec![in_local("Microsoft\\Edge\\User Data\\Default")],
+        );
+        add(
+            "brave",
+            vec![in_local("BraveSoftware\\Brave-Browser\\User Data\\Default")],
+        );
+        add("chromium", vec![in_local("Chromium\\User Data\\Default")]);
+        add("opera", vec![in_roaming("Opera Software\\Opera Stable")]);
+        add("vivaldi", vec![in_local("Vivaldi\\User Data\\Default")]);
+    }
+
+    #[cfg(not(windows))]
+    {
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let at = |tail: &str| home.as_ref().map(|base| base.join(tail));
+
+        add("firefox", vec![at(".mozilla/firefox")]);
+        add("chrome", vec![at(".config/google-chrome/Default")]);
+        add("edge", vec![at(".config/microsoft-edge/Default")]);
+        add(
+            "brave",
+            vec![at(".config/BraveSoftware/Brave-Browser/Default")],
+        );
+        add("chromium", vec![at(".config/chromium/Default")]);
+        add("opera", vec![at(".config/opera")]);
+        add("vivaldi", vec![at(".config/vivaldi/Default")]);
+    }
+
+    found
+}
+
 pub fn command(program: &Path) -> Command {
     #[allow(unused_mut)]
     let mut cmd = Command::new(program);
@@ -97,7 +164,10 @@ pub fn curl_text(url: &str) -> Result<String, String> {
         .map_err(|err| format!("curl não pôde ser executado: {err}"))?;
 
     if !out.status.success() {
-        return Err(format!("Falha ao buscar {url}: {}", stderr_tail(&out.stderr)));
+        return Err(format!(
+            "Falha ao buscar {url}: {}",
+            stderr_tail(&out.stderr)
+        ));
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -181,7 +251,8 @@ fn find_below(dir: &Path, name: &str, depth: usize) -> Option<PathBuf> {
             dirs.push(path);
         }
     }
-    dirs.into_iter().find_map(|dir| find_below(&dir, name, depth - 1))
+    dirs.into_iter()
+        .find_map(|dir| find_below(&dir, name, depth - 1))
 }
 
 pub fn ensure_ytdlp(mut log: impl FnMut(&str)) -> Result<PathBuf, String> {

@@ -19,14 +19,21 @@ fn default_folder() -> String {
         .or_else(|_| std::env::var("HOME"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| std::env::temp_dir());
-    base.join("Downloads").join("ClipHarbor").display().to_string()
+    base.join("Downloads")
+        .join("ClipHarbor")
+        .display()
+        .to_string()
 }
 
 fn open_folder(path: &str) {
     #[cfg(windows)]
-    let _ = deps::command(std::path::Path::new("explorer")).arg(path).spawn();
+    let _ = deps::command(std::path::Path::new("explorer"))
+        .arg(path)
+        .spawn();
     #[cfg(not(windows))]
-    let _ = deps::command(std::path::Path::new("xdg-open")).arg(path).spawn();
+    let _ = deps::command(std::path::Path::new("xdg-open"))
+        .arg(path)
+        .spawn();
 }
 
 fn main() -> eframe::Result<()> {
@@ -104,6 +111,8 @@ struct App {
     url: String,
     folder: String,
     cookies: String,
+    /// Browsers with a profile here; offering a missing one breaks every track.
+    browsers: Vec<&'static str>,
     format: Format,
     log_lines: Vec<String>,
     receiver: Option<Receiver<Event>>,
@@ -115,10 +124,16 @@ struct App {
 
 impl App {
     fn new() -> Self {
+        let browsers = deps::installed_browsers();
+        let cookies = browsers
+            .first()
+            .map(|name| name.to_string())
+            .unwrap_or_else(|| "nenhum".to_string());
         Self {
             url: String::new(),
             folder: default_folder(),
-            cookies: "firefox".to_string(),
+            cookies,
+            browsers,
             format: Format::Audio,
             log_lines: Vec::new(),
             receiver: None,
@@ -224,11 +239,16 @@ impl eframe::App for App {
                 egui::ComboBox::from_id_salt("cookies")
                     .selected_text(&self.cookies)
                     .show_ui(ui, |ui| {
-                        for option in ["firefox", "chrome", "edge", "brave", "chromium", "nenhum"] {
-                            ui.selectable_value(&mut self.cookies, option.to_string(), option);
+                        for option in &self.browsers {
+                            ui.selectable_value(&mut self.cookies, option.to_string(), *option);
                         }
+                        ui.selectable_value(&mut self.cookies, "nenhum".to_string(), "nenhum");
                     });
-                ui.label("(o YouTube exige sessão; escolha o navegador logado)");
+                if self.browsers.is_empty() {
+                    ui.label("(nenhum navegador com perfil encontrado; baixando sem cookies)");
+                } else {
+                    ui.label("(escolha o navegador logado no YouTube)");
+                }
             });
 
             ui.horizontal(|ui| {
