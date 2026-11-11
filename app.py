@@ -187,17 +187,103 @@ def get_spotify_info(url: str) -> dict:
     return get_spotify_track_info(url)
 
 
+CLOUD_HOST_ENV_VARS = (
+    "RENDER",
+    "VERCEL",
+    "DYNO",
+    "K_SERVICE",
+    "FLY_APP_NAME",
+    "RAILWAY_ENVIRONMENT",
+)
+
+_browser_cookies_spec: str | None = None
+_browser_cookies_resolved = False
+
+
+def _local_browser_profile_dirs() -> dict[str, list[Path]]:
+    home = Path.home()
+    if sys.platform == "win32":
+        local = Path(os.environ.get("LOCALAPPDATA") or home / "AppData" / "Local")
+        roaming = Path(os.environ.get("APPDATA") or home / "AppData" / "Roaming")
+        return {
+            "firefox": [roaming / "Mozilla" / "Firefox" / "Profiles"],
+            "chrome": [local / "Google" / "Chrome" / "User Data"],
+            "edge": [local / "Microsoft" / "Edge" / "User Data"],
+            "brave": [local / "BraveSoftware" / "Brave-Browser" / "User Data"],
+            "chromium": [local / "Chromium" / "User Data"],
+        }
+    if sys.platform == "darwin":
+        support = home / "Library" / "Application Support"
+        return {
+            "firefox": [support / "Firefox" / "Profiles"],
+            "chrome": [support / "Google" / "Chrome"],
+            "edge": [support / "Microsoft Edge"],
+            "brave": [support / "BraveSoftware" / "Brave-Browser"],
+            "chromium": [support / "Chromium"],
+        }
+    config = Path(os.environ.get("XDG_CONFIG_HOME") or home / ".config")
+    return {
+        "firefox": [
+            home / ".mozilla" / "firefox",
+            home / "snap" / "firefox" / "common" / ".mozilla" / "firefox",
+        ],
+        "chrome": [config / "google-chrome"],
+        "edge": [config / "microsoft-edge"],
+        "brave": [config / "BraveSoftware" / "Brave-Browser"],
+        "chromium": [config / "chromium"],
+    }
+
+
+def local_browser_cookies_spec() -> str | None:
+    """Browser whose cookies yt-dlp should read from this computer, if any.
+
+    Only used when ClipHarbor runs on the user's own machine: a hosted deploy
+    has no browser profile to read, so nothing is auto-detected there.
+    """
+    global _browser_cookies_spec, _browser_cookies_resolved
+    if _browser_cookies_resolved:
+        return _browser_cookies_spec
+    _browser_cookies_resolved = True
+
+    spec = (os.environ.get("YT_DLP_COOKIES_FROM_BROWSER") or "").strip()
+    if spec:
+        _browser_cookies_spec = spec
+        return spec
+    if (os.environ.get("CLIPHARBOR_NO_BROWSER_COOKIES") or "").strip():
+        return None
+    if any(os.environ.get(name) for name in CLOUD_HOST_ENV_VARS):
+        return None
+
+    for browser, dirs in _local_browser_profile_dirs().items():
+        if any(directory.is_dir() for directory in dirs):
+            logger.info("Using %s cookies from this computer for yt-dlp.", browser)
+            _browser_cookies_spec = browser
+            return browser
+    return None
+
+
 def yt_dlp_cookies_configured() -> bool:
     path = (os.environ.get("YT_DLP_COOKIES_FILE") or os.environ.get("YT_DLP_COOKIES_PATH") or "").strip()
     if path and Path(path).is_file():
         return True
-    return bool((os.environ.get("YT_DLP_COOKIES_B64") or "").strip())
+    if (os.environ.get("YT_DLP_COOKIES_B64") or "").strip():
+        return True
+    return bool(local_browser_cookies_spec())
 
 
-def yt_dlp_command(media_url: str, *args, cookies_path: str | None = None):
+def yt_dlp_command(
+    media_url: str,
+    *args,
+    cookies_path: str | None = None,
+    browser_cookies: bool = True,
+):
     cmd = [sys.executable, "-m", "yt_dlp", "--no-playlist"]
     if cookies_path:
         cmd.extend(["--cookies", cookies_path])
+    elif browser_cookies:
+        spec = local_browser_cookies_spec()
+        if spec:
+            cmd.extend(["--cookies-from-browser", spec])
     spec = (os.environ.get("YT_DLP_YOUTUBE_EXTRACTOR_ARGS") or "").strip()
     if spec and is_youtube_url(media_url):
         cmd.extend(["--extractor-args", spec])
@@ -253,10 +339,52 @@ def last_error_line(stderr: str | None) -> str:
     text = (stderr or "").strip()
     if not text:
         return "The request could not be completed."
-    # yt-dlp often appends progress/debug lines after the useful
-    # exception. Keep the final diagnostic lines for logs and API responses.
+    # yt-dlp appends WARNING lines (missing JS runtime, 429s) around the real
+    # exception, which buries it in API responses. Keep the ERROR lines.
     lines = [line.strip() for line in text.splitlines() if line.strip()]
-    return " | ".join(lines[-4:])[:1200]
+    errors = [line for line in lines if "ERROR:" in line]
+    return " | ".join((errors or lines)[-2:])[:900]
+
+
+COOKIE_READ_FAILURE_MARKERS = (
+    "failed to decrypt",
+    "app-bound",
+    "could not find firefox",
+    "could not find chrome",
+    "unable to open database file",
+    "permission denied",
+)
+
+
+def browser_cookies_unreadable(stderr: str | None) -> bool:
+    low = (stderr or "").lower()
+    return "cookies" in low and any(marker in low for marker in COOKIE_READ_FAILURE_MARKERS)
+
+
+def run_yt_dlp(
+    media_url: str,
+    *args,
+    cookies_path: str | None = None,
+    timeout: int = 300,
+    browser_cookies: bool = True,
+):
+    """Run yt-dlp, dropping browser cookies if this machine cannot supply them."""
+    command = yt_dlp_command(
+        media_url, *args, cookies_path=cookies_path, browser_cookies=browser_cookies
+    )
+    result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    if (
+        result.returncode != 0
+        and not cookies_path
+        and browser_cookies
+        and browser_cookies_unreadable(result.stderr)
+    ):
+        logger.info("Could not read browser cookies; retrying without them.")
+        command = yt_dlp_command(
+            media_url, *args, cookies_path=None, browser_cookies=False
+        )
+        result = subprocess.run(command, capture_output=True, text=True, timeout=timeout)
+    return result
 
 
 def ytdlp_error_message(stderr: str | None, media_url: str = "") -> str:
@@ -323,8 +451,7 @@ def spotify_audio_providers() -> list[str]:
 def yt_dlp_search(query: str) -> list[dict]:
     """Run a yt-dlp search and return its result entries."""
     with yt_dlp_cookies_context() as ck:
-        command = yt_dlp_command("", "--flat-playlist", "-j", query, cookies_path=ck)
-        result = subprocess.run(command, capture_output=True, text=True, timeout=90)
+        result = run_yt_dlp("", "--flat-playlist", "-j", query, cookies_path=ck, timeout=90)
 
     entries: list[dict] = []
     for line in (result.stdout or "").splitlines():
@@ -403,7 +530,7 @@ def find_spotify_audio_candidates(title: str, duration) -> list[tuple[str, str]]
 def download_audio_file(media_url: str, output_template: str, ffmpeg_path: str) -> str:
     """Download media_url as MP3 and return the produced file path."""
     with yt_dlp_cookies_context() as ck:
-        command = yt_dlp_command(
+        result = run_yt_dlp(
             media_url,
             "-x",
             "--audio-format",
@@ -417,8 +544,8 @@ def download_audio_file(media_url: str, output_template: str, ffmpeg_path: str) 
             ffmpeg_path,
             media_url,
             cookies_path=ck,
+            timeout=300,
         )
-        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
 
     if result.returncode != 0:
         raise RuntimeError(last_error_line(result.stderr) or last_error_line(result.stdout))
@@ -671,8 +798,7 @@ def get_info():
 
     try:
         with yt_dlp_cookies_context() as ck:
-            command = yt_dlp_command(url, "-j", url, cookies_path=ck)
-            result = subprocess.run(command, capture_output=True, text=True, timeout=60)
+            result = run_yt_dlp(url, "-j", url, cookies_path=ck, timeout=60)
         if result.returncode != 0:
             err = ytdlp_error_message(result.stderr, url)
             logger.warning("yt-dlp info failed for %s: %s", url, err)
@@ -837,23 +963,23 @@ def download_media():
 
     try:
         with yt_dlp_cookies_context() as ck:
-            command = yt_dlp_command(url, "-o", output_template, cookies_path=ck)
+            extra_args = ["-o", output_template]
             if format_choice == "audio":
-                command += ["-x", "--audio-format", "mp3", "--ffmpeg-location", ffmpeg_path]
+                extra_args += ["-x", "--audio-format", "mp3", "--ffmpeg-location", ffmpeg_path]
             elif format_id:
-                command += [
+                extra_args += [
                     "-f", f"{format_id}+bestaudio/best",
                     "--merge-output-format", "mp4",
                     "--ffmpeg-location", ffmpeg_path,
                 ]
             else:
-                command += [
+                extra_args += [
                     "-f", "bestvideo+bestaudio/best",
                     "--merge-output-format", "mp4",
                     "--ffmpeg-location", ffmpeg_path,
                 ]
-            command.append(url)
-            result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+            extra_args.append(url)
+            result = run_yt_dlp(url, *extra_args, cookies_path=ck, timeout=300)
 
         if result.returncode != 0:
             err = ytdlp_error_message(result.stderr, url)
