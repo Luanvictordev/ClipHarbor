@@ -94,6 +94,10 @@ Playlists and albums are downloaded track by track into a ZIP. Tracks that could
 
 Requirements: `ffmpeg`, which the `Dockerfile` installs system-wide and local installs get through `imageio-ffmpeg`. No Spotify API key, spotDL, or Deno runtime is needed.
 
+### Desktop app (Windows)
+
+`desktop/` holds a small native app for running downloads on your own machine: it needs no Python and no browser tab, uses your browser's cookies for YouTube, and writes MP3s with the Spotify tags and cover artwork. The executable is built by the **Desktop app (Windows)** GitHub Actions workflow — download it from the run's artifacts, unzip and run. See [desktop/README.md](desktop/README.md).
+
 ### Hosting on Render (Free plan)
 
 - The Free plan gives **512 MB** of RAM, so avoid reintroducing heavy optional dependencies in the request path: spotDL used roughly **165 MB** just by being imported, and one download could push the service into an out-of-memory restart (the log shows `Handling signal: term` right after the download starts, and the browser reports `Download failed`).

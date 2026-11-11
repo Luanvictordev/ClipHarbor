@@ -1,0 +1,30 @@
+name: Desktop app (Windows)
+
+on:
+  push:
+    paths:
+      - "desktop/**"
+      - ".github/workflows/desktop.yml"
+  workflow_dispatch:
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop
+
+      - name: Build release
+        run: cargo build --release --manifest-path desktop/Cargo.toml
+
+      - name: Upload executable
+        uses: actions/upload-artifact@v4
+        with:
+          name: clipharbor-desktop-windows
+          path: desktop/target/release/clipharbor-desktop.exe
+          if-no-files-found: error

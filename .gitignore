@@ -32,3 +32,6 @@ Thumbs.db
 # Logs & temp
 *.log
 .clipharbor-cache/
+
+# Rust desktop app build output
+desktop/target/
