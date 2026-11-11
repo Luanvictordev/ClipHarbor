@@ -58,8 +58,8 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([900.0, 780.0])
-            .with_min_inner_size([640.0, 560.0])
+            .with_inner_size([960.0, 900.0])
+            .with_min_inner_size([700.0, 620.0])
             .with_title("ClipHarbor"),
         ..Default::default()
     };
@@ -311,18 +311,16 @@ impl App {
 
     fn header(&self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            theme::brand_mark(ui);
+            ui.add_space(2.0);
             ui.vertical(|ui| {
-                ui.label(
-                    RichText::new("ClipHarbor")
-                        .size(21.0)
-                        .strong()
-                        .color(theme::TEXT),
-                );
-                theme::muted(ui, "Áudio do Spotify, vídeos e links, neste computador.");
+                theme::heading(ui, "ClipHarbor");
+                theme::muted(ui, "Baixador de mídia para o seu computador");
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let (text, color) = self.status();
                 theme::pill(ui, text, color);
+                ui.add_space(6.0);
                 theme::label(ui, "v0.1", theme::FAINT, 11.5);
             });
         });
@@ -332,46 +330,40 @@ impl App {
         let mut start = false;
 
         theme::card(ui, |ui| {
-            theme::section(ui, "Link");
-            egui::Frame::none()
-                .fill(theme::SURFACE_2)
-                .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-                .rounding(egui::Rounding::same(9.0))
-                .inner_margin(egui::Margin::symmetric(4.0, 3.0))
-                .show(ui, |ui| {
-                    ui.add_sized(
-                        [ui.available_width(), 30.0],
-                        egui::TextEdit::singleline(&mut self.url)
-                            .hint_text(
-                                RichText::new(
-                                    "https://open.spotify.com/track/…  ou  https://youtu.be/…",
-                                )
-                                .color(theme::FAINT),
-                            )
-                            .frame(false)
-                            .margin(egui::Margin::symmetric(6.0, 6.0))
-                            .font(egui::FontId::new(14.0, egui::FontFamily::Proportional)),
-                    );
-                });
+            theme::section(ui, "Link de mídia");
+            ui.add_sized(
+                [ui.available_width(), 40.0],
+                egui::TextEdit::singleline(&mut self.url)
+                    .hint_text(
+                        RichText::new(
+                            "https://open.spotify.com/track/…  ou  https://youtu.be/…",
+                        )
+                        .color(theme::PLACEHOLDER),
+                    )
+                    .frame(true)
+                    .margin(egui::Margin::symmetric(12.0, 10.0))
+                    .font(egui::FontId::new(14.0, egui::FontFamily::Proportional)),
+            );
 
-            ui.add_space(10.0);
+            ui.add_space(12.0);
             theme::section(ui, "Salvar em");
             ui.horizontal(|ui| {
-                let button_width = 104.0;
+                let button_width = 112.0;
                 ui.add_sized(
-                    [(ui.available_width() - button_width - 8.0).max(160.0), 32.0],
+                    [(ui.available_width() - button_width - 8.0).max(160.0), 36.0],
                     egui::TextEdit::singleline(&mut self.folder)
-                        .margin(egui::Margin::symmetric(10.0, 7.0))
+                        .frame(true)
+                        .margin(egui::Margin::symmetric(12.0, 9.0))
                         .font(egui::FontId::new(14.0, egui::FontFamily::Proportional)),
                 );
-                if theme::button(ui, "Abrir pasta", theme::Kind::Ghost).clicked() {
+                if theme::button(ui, "Abrir pasta", theme::Kind::Secondary).clicked() {
                     open_folder(self.folder.trim());
                 }
             });
 
-            ui.add_space(10.0);
+            ui.add_space(12.0);
             ui.horizontal(|ui| {
-                theme::label(ui, "Formato", theme::FAINT, 10.5);
+                theme::label(ui, "Formato", theme::FAINT, 11.5);
                 let options = [
                     ("MP3", self.format == Format::Audio),
                     ("MP4", self.format == Format::Video),
@@ -385,9 +377,9 @@ impl App {
                 }
 
                 ui.add_space(12.0);
-                theme::label(ui, "Cookies", theme::FAINT, 10.5);
+                theme::label(ui, "Cookies", theme::FAINT, 11.5);
                 egui::ComboBox::from_id_salt("cookies")
-                    .width(120.0)
+                    .width(140.0)
                     .selected_text(&self.browser)
                     .show_ui(ui, |ui| {
                         for option in &self.browsers {
@@ -398,11 +390,11 @@ impl App {
             });
 
             if self.browsers.is_empty() {
-                theme::label(
+                ui.add_space(12.0);
+                theme::notice(
                     ui,
                     "Nenhum navegador com perfil encontrado: os downloads vão sem cookies.",
-                    theme::WARN,
-                    11.5,
+                    theme::Tone::Warning,
                 );
             } else if cfg!(windows)
                 && matches!(
@@ -410,30 +402,29 @@ impl App {
                     "chrome" | "edge" | "brave" | "chromium" | "vivaldi" | "opera"
                 )
             {
-                theme::label(
+                ui.add_space(12.0);
+                theme::notice(
                     ui,
                     "Chrome/Edge no Windows protegem os cookies com App-Bound Encryption e o yt-dlp não consegue lê-los. Prefira Firefox ou um cookies.txt.",
-                    theme::WARN,
-                    11.5,
+                    theme::Tone::Warning,
                 );
             }
 
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                theme::label(ui, "cookies.txt", theme::FAINT, 10.5);
-                ui.add_sized(
-                    [ui.available_width(), 30.0],
-                    egui::TextEdit::singleline(&mut self.cookies_file)
-                        .hint_text(
-                            RichText::new("opcional: caminho do cookies.txt (formato Netscape)")
-                                .color(theme::FAINT),
-                        )
-                        .margin(egui::Margin::symmetric(10.0, 6.0))
-                        .font(egui::FontId::new(12.5, egui::FontFamily::Proportional)),
-                );
-            });
-
             ui.add_space(12.0);
+            theme::section(ui, "cookies.txt (opcional)");
+            ui.add_sized(
+                [ui.available_width(), 36.0],
+                egui::TextEdit::singleline(&mut self.cookies_file)
+                    .hint_text(
+                        RichText::new("caminho do cookies.txt (formato Netscape)")
+                            .color(theme::PLACEHOLDER),
+                    )
+                    .frame(true)
+                    .margin(egui::Margin::symmetric(12.0, 8.0))
+                    .font(egui::FontId::new(12.5, egui::FontFamily::Proportional)),
+            );
+
+            ui.add_space(14.0);
             let label = match self.phase {
                 Phase::Running => "Parar depois desta faixa",
                 Phase::Stopping => "Parando…",
@@ -464,51 +455,55 @@ impl App {
     fn progress_card(&self, ui: &mut egui::Ui) {
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {
-                theme::label(ui, "Progresso", theme::TEXT, 13.0);
+                ui.vertical(|ui| {
+                    theme::title(ui, "Progresso");
+                });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let (text, color) = self.status();
+                    theme::pill(ui, text, color);
+                    ui.add_space(8.0);
                     theme::label(
                         ui,
                         &format!("{:.0}%", self.progress * 100.0),
-                        theme::MUTED,
-                        12.0,
+                        theme::TEXT,
+                        24.0,
                     );
                 });
             });
-            ui.add_space(4.0);
+
+            ui.add_space(12.0);
             theme::progress(ui, self.progress);
-            ui.add_space(8.0);
+            ui.add_space(10.0);
 
             let line = match &self.track {
                 Some((index, total, title)) => format!("Faixa {index}/{total} · {title}"),
-                None if self.phase == Phase::Running => "Preparando…".to_string(),
-                None => "Nada na fila.".to_string(),
+                None if self.phase == Phase::Running => "Preparando o download…".to_string(),
+                None => "Nada na fila. Cole um link para começar.".to_string(),
             };
             theme::label(ui, &line, theme::MUTED, 12.5);
 
             if !self.summary.is_empty() {
-                ui.add_space(6.0);
-                let color = match self.phase {
-                    Phase::Failed => theme::ERR,
-                    Phase::Finished => theme::OK,
-                    _ => theme::MUTED,
+                ui.add_space(10.0);
+                let tone = match self.phase {
+                    Phase::Failed => theme::Tone::Error,
+                    Phase::Finished => theme::Tone::Success,
+                    _ => theme::Tone::Info,
                 };
-                theme::label(ui, &self.summary, color, 12.5);
+                theme::notice(ui, &self.summary, tone);
             }
 
             if self.files > 0 || self.failures > 0 {
-                ui.add_space(6.0);
+                ui.add_space(10.0);
                 ui.horizontal(|ui| {
-                    theme::label(ui, &format!("{} salvos", self.files), theme::OK, 12.0);
-                    theme::label(ui, "·", theme::FAINT, 12.0);
-                    theme::label(
+                    theme::pill(
+                        ui,
+                        &format!("{} salvos", self.files),
+                        if self.files > 0 { theme::OK } else { theme::FAINT },
+                    );
+                    theme::pill(
                         ui,
                         &format!("{} falhas", self.failures),
-                        if self.failures > 0 {
-                            theme::ERR
-                        } else {
-                            theme::MUTED
-                        },
-                        12.0,
+                        if self.failures > 0 { theme::ERR } else { theme::FAINT },
                     );
                 });
             }
@@ -519,23 +514,23 @@ impl App {
         let mut clear = false;
         theme::card(ui, |ui| {
             ui.horizontal(|ui| {
-                theme::label(ui, "Registro", theme::TEXT, 13.0);
+                theme::title(ui, "Registro");
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if theme::button(ui, "Limpar", theme::Kind::Ghost).clicked() {
+                    if theme::button(ui, "Limpar", theme::Kind::Secondary).clicked() {
                         clear = true;
                     }
                 });
             });
-            ui.add_space(4.0);
+            ui.add_space(8.0);
 
             egui::Frame::none()
-                .fill(theme::BG)
+                .fill(theme::SURFACE_2)
                 .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
-                .rounding(egui::Rounding::same(9.0))
+                .rounding(egui::Rounding::same(10.0))
                 .inner_margin(egui::Margin::symmetric(12.0, 10.0))
                 .show(ui, |ui| {
                     egui::ScrollArea::vertical()
-                        .max_height(170.0)
+                        .max_height(110.0)
                         .auto_shrink([false, false])
                         .stick_to_bottom(true)
                         .show(ui, |ui| {
@@ -543,7 +538,7 @@ impl App {
                                 theme::label(
                                     ui,
                                     "Os detalhes do download aparecem aqui.",
-                                    theme::FAINT,
+                                    theme::PLACEHOLDER,
                                     12.0,
                                 );
                             }
@@ -575,7 +570,7 @@ impl App {
             .frame(
                 egui::Frame::none()
                     .fill(theme::BG)
-                    .inner_margin(egui::Margin::symmetric(22.0, 20.0)),
+                    .inner_margin(egui::Margin::symmetric(24.0, 20.0)),
             )
             .show(ctx, |ui| {
                 // A shorter window scrolls instead of clipping the log away.
@@ -583,12 +578,19 @@ impl App {
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         self.header(ui);
-                        ui.add_space(14.0);
+                        ui.add_space(16.0);
                         self.form(ui);
-                        ui.add_space(10.0);
-                        self.progress_card(ui);
-                        ui.add_space(10.0);
-                        self.log_card(ui);
+                        ui.add_space(12.0);
+                        if ui.available_width() >= 780.0 {
+                            ui.columns(2, |columns| {
+                                self.progress_card(&mut columns[0]);
+                                self.log_card(&mut columns[1]);
+                            });
+                        } else {
+                            self.progress_card(ui);
+                            ui.add_space(12.0);
+                            self.log_card(ui);
+                        }
                         content = ui.min_rect().bottom();
                     });
             });
@@ -605,7 +607,7 @@ impl eframe::App for App {
 /// Layout smoke test that needs no display server: the window is rendered to
 /// shapes and the geometry is checked against the visible area.
 fn check_layout() -> eframe::Result<()> {
-    let size = egui::vec2(900.0, 780.0);
+    let size = egui::vec2(960.0, 900.0);
     let ctx = egui::Context::default();
     theme::apply(&ctx);
 
