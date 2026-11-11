@@ -38,6 +38,8 @@ pub fn tag_mp3(
         }
     }
 
-    tag.write_to_path(path, Version::Id3v24)
+    // ID3v2.3 is what Windows Explorer and older players actually display;
+    // v2.4 artwork is often ignored there, which looked like "no cover".
+    tag.write_to_path(path, Version::Id3v23)
         .map_err(|err| format!("não consegui gravar as tags: {err}"))
 }

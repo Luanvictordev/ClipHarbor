@@ -1,7 +1,9 @@
 //! Download pipeline: Spotify links (through search) and direct media links.
 
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::Sender;
+use std::sync::Arc;
 
 use crate::deps;
 use crate::spotify::{self, Track};
@@ -14,8 +16,34 @@ pub enum Format {
     Video,
 }
 
+/// Severity of a log line, so the window can colour it instead of guessing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Level {
+    Info,
+    Ok,
+    Warn,
+    Error,
+}
+
+/// Everything one download needs, shared by the window and the `--cli` mode.
+pub struct Request {
+    pub url: String,
+    pub format: Format,
+    /// Browser whose cookies yt-dlp should read, e.g. "firefox".
+    pub browser: Option<String>,
+    /// Netscape `cookies.txt` for browsers yt-dlp cannot read on its own.
+    pub cookies_file: Option<PathBuf>,
+    pub out_dir: PathBuf,
+}
+
 pub enum Event {
-    Log(String),
+    Log(Level, String),
+    /// A track is starting; `index` is one-based.
+    Track {
+        index: usize,
+        total: usize,
+        title: String,
+    },
     Progress(f32),
     Finished(Outcome),
     Failed(String),
@@ -25,18 +53,17 @@ pub enum Event {
 pub struct Outcome {
     pub files: Vec<PathBuf>,
     pub failures: Vec<String>,
+    pub cancelled: bool,
 }
 
 /// Run a download on the calling thread, reporting through `tx`.
 pub fn run(
-    url: String,
-    format: Format,
-    cookies: Option<String>,
-    out_dir: PathBuf,
+    request: Request,
+    cancel: Arc<AtomicBool>,
     tx: Sender<Event>,
     notify: impl Fn() + Send + 'static,
 ) {
-    let event = match execute(&url, format, cookies, &out_dir, &tx, &notify) {
+    let event = match execute(&request, &cancel, &tx, &notify) {
         Ok(outcome) => Event::Finished(outcome),
         Err(err) => Event::Failed(err),
     };
@@ -44,51 +71,82 @@ pub fn run(
     notify();
 }
 
-fn log(tx: &Sender<Event>, notify: &impl Fn(), message: impl Into<String>) {
-    let _ = tx.send(Event::Log(message.into()));
+fn emit(tx: &Sender<Event>, notify: &impl Fn(), level: Level, message: impl Into<String>) {
+    let _ = tx.send(Event::Log(level, message.into()));
     notify();
 }
 
+fn log(tx: &Sender<Event>, notify: &impl Fn(), message: impl Into<String>) {
+    emit(tx, notify, Level::Info, message);
+}
+
+fn stopped(cancel: &AtomicBool) -> bool {
+    cancel.load(Ordering::Relaxed)
+}
+
 fn execute(
-    url: &str,
-    format: Format,
-    cookies: Option<String>,
-    out_dir: &Path,
+    request: &Request,
+    cancel: &Arc<AtomicBool>,
     tx: &Sender<Event>,
     notify: &impl Fn(),
 ) -> Result<Outcome, String> {
-    std::fs::create_dir_all(out_dir)
+    std::fs::create_dir_all(&request.out_dir)
         .map_err(|err| format!("Não consegui criar a pasta de destino: {err}"))?;
 
-    log(tx, notify, "Procurando yt-dlp e ffmpeg...");
+    log(tx, notify, "Preparando yt-dlp e ffmpeg...");
     let exe = deps::ensure_ytdlp(|line| log(tx, notify, line))?;
     let ffmpeg = deps::ensure_ffmpeg(|line| log(tx, notify, line))?;
 
-    let mut cookies = cookies.filter(|value| !value.trim().is_empty());
-    if let Some(browser) = cookies.as_deref() {
-        if !deps::installed_browsers().contains(&browser) {
-            log(
+    let mut browser = request
+        .browser
+        .clone()
+        .filter(|value| !value.trim().is_empty() && value != "nenhum");
+    if let Some(name) = browser.as_deref() {
+        if !deps::installed_browsers().contains(&name) {
+            emit(
                 tx,
                 notify,
-                format!(
-                    "Aviso: não encontrei cookies do {browser} neste PC (navegador não instalado \
-                     ou sem perfil). Vou tentar sem cookies."
-                ),
+                Level::Warn,
+                format!("Não encontrei um perfil do {name} neste PC; seguindo sem cookies."),
             );
-            cookies = None;
+            browser = None;
         }
     }
 
-    let ytdlp = YtDlp::new(exe, ffmpeg, cookies);
+    let cookies_file = request.cookies_file.clone().filter(|path| {
+        if path.is_file() {
+            true
+        } else {
+            emit(
+                tx,
+                notify,
+                Level::Warn,
+                format!(
+                    "O arquivo de cookies não existe ({}); seguindo sem ele.",
+                    path.display()
+                ),
+            );
+            false
+        }
+    });
 
-    if spotify::is_spotify_url(url) {
-        return download_spotify(&ytdlp, url, out_dir, tx, notify);
+    let ytdlp = YtDlp::new(exe, ffmpeg, browser, cookies_file);
+
+    if spotify::is_spotify_url(&request.url) {
+        return download_spotify(&ytdlp, request, cancel, tx, notify);
     }
 
-    if format == Format::Video {
-        return download_direct_video(&ytdlp, url, out_dir, tx, notify);
+    if stopped(cancel) {
+        return Ok(Outcome {
+            cancelled: true,
+            ..Outcome::default()
+        });
     }
-    download_direct_audio(&ytdlp, url, out_dir, tx, notify)
+
+    if request.format == Format::Video {
+        return download_direct_video(&ytdlp, request, tx, notify);
+    }
+    download_direct_audio(&ytdlp, request, tx, notify)
 }
 
 fn temporary_dir() -> PathBuf {
@@ -154,25 +212,25 @@ fn move_file(from: &Path, to: &Path) -> Result<(), String> {
         .map_err(|err| format!("não consegui salvar o arquivo: {err}"))
 }
 
-fn fetch_cover(url: &str, dir: &Path) -> Option<PathBuf> {
+fn fetch_cover(url: &str, dir: &Path) -> Result<Option<PathBuf>, String> {
     if url.is_empty() {
-        return None;
+        return Ok(None);
     }
     let destination = dir.join("cover.jpg");
     deps::curl_download(url, &destination)
-        .ok()
-        .map(|_| destination)
+        .map(|_| Some(destination))
+        .map_err(|err| format!("não consegui baixar a capa: {err}"))
 }
 
 fn download_spotify(
     ytdlp: &YtDlp,
-    url: &str,
-    out_dir: &Path,
+    request: &Request,
+    cancel: &AtomicBool,
     tx: &Sender<Event>,
     notify: &impl Fn(),
 ) -> Result<Outcome, String> {
     log(tx, notify, "Lendo os metadados do Spotify...");
-    let entity = spotify::fetch(url)?;
+    let entity = spotify::fetch(&request.url)?;
     let total = entity.tracks.len();
     log(tx, notify, format!("{} — {total} faixa(s)", entity.name));
 
@@ -181,25 +239,33 @@ fn download_spotify(
 
     let mut outcome = Outcome::default();
     for (index, track) in entity.tracks.iter().enumerate() {
-        log(
-            tx,
-            notify,
-            format!("[{}/{}] {}", index + 1, total, track.title),
-        );
-        match download_track(ytdlp, track, out_dir, &temp, tx, notify) {
+        if stopped(cancel) {
+            outcome.cancelled = true;
+            break;
+        }
+
+        let _ = tx.send(Event::Track {
+            index: index + 1,
+            total,
+            title: track.title.clone(),
+        });
+        notify();
+
+        match download_track(ytdlp, track, &request.out_dir, &temp, tx, notify) {
             Ok(path) => {
-                log(
+                emit(
                     tx,
                     notify,
+                    Level::Ok,
                     format!(
-                        "    salvo: {}",
+                        "{} salvo",
                         path.file_name().unwrap_or_default().to_string_lossy()
                     ),
                 );
                 outcome.files.push(path);
             }
             Err(err) => {
-                log(tx, notify, format!("    falhou: {err}"));
+                emit(tx, notify, Level::Error, err.clone());
                 outcome.failures.push(format!("{} — {err}", track.title));
             }
         }
@@ -209,8 +275,17 @@ fn download_spotify(
 
     let _ = std::fs::remove_dir_all(&temp);
 
+    if outcome.cancelled {
+        emit(
+            tx,
+            notify,
+            Level::Warn,
+            "Interrompido antes da próxima faixa.",
+        );
+    }
+
     if !outcome.failures.is_empty() {
-        let report = out_dir.join("faixas-nao-baixadas.txt");
+        let report = request.out_dir.join("faixas-nao-baixadas.txt");
         let body = format!(
             "Faixas sem fonte de áudio ({}/{}):\n\n{}",
             outcome.failures.len(),
@@ -218,9 +293,10 @@ fn download_spotify(
             outcome.failures.join("\n")
         );
         let _ = std::fs::write(&report, body);
-        log(
+        emit(
             tx,
             notify,
+            Level::Warn,
             format!(
                 "{} faixa(s) sem fonte. Lista em {}",
                 outcome.failures.len(),
@@ -229,27 +305,10 @@ fn download_spotify(
         );
     }
 
-    if outcome.files.is_empty() {
+    if outcome.files.is_empty() && !outcome.cancelled {
         return Err("Nenhuma faixa pôde ser baixada.".to_string());
     }
     Ok(outcome)
-}
-
-/// Report, once, that the browser cookies could not be read.
-///
-/// yt-dlp already retried without them; this only keeps the user from
-/// wondering why the session was ignored.
-fn flush_cookie_problem(ytdlp: &YtDlp, tx: &Sender<Event>, notify: &impl Fn()) {
-    if let Some(problem) = ytdlp.take_cookie_problem() {
-        log(
-            tx,
-            notify,
-            format!(
-                "Aviso: os cookies do navegador não puderam ser lidos ({problem}). \
-                 Seguindo sem cookies; se o YouTube exigir login, feche o navegador e tente de novo."
-            ),
-        );
-    }
 }
 
 fn download_track(
@@ -273,23 +332,30 @@ fn download_track(
             Ok(()) => {
                 let produced = newest_file(temp, &["mp3"])
                     .ok_or_else(|| "o download terminou sem gerar um MP3".to_string())?;
-                let cover = fetch_cover(&track.cover, temp);
-                let _ = tags::tag_mp3(
-                    &produced,
-                    &track.name,
-                    &track.artist,
-                    &track.album,
-                    cover.as_deref(),
-                );
+                match fetch_cover(&track.cover, temp) {
+                    Ok(cover) => {
+                        if let Err(err) = tags::tag_mp3(
+                            &produced,
+                            &track.name,
+                            &track.artist,
+                            &track.album,
+                            cover.as_deref(),
+                        ) {
+                            emit(tx, notify, Level::Warn, format!("metadados: {err}"));
+                        }
+                    }
+                    Err(err) => emit(tx, notify, Level::Warn, err),
+                }
                 let destination = out_dir.join(format!("{}.mp3", sanitize(&track.title)));
                 move_file(&produced, &destination)?;
                 return Ok(destination);
             }
             Err(err) => {
-                log(
+                emit(
                     tx,
                     notify,
-                    format!("    {}: {err}", short_source(&ytdlp::media_url(candidate))),
+                    Level::Warn,
+                    format!("{}: {err}", short_source(&ytdlp::media_url(candidate))),
                 );
                 last_error = err;
             }
@@ -308,10 +374,40 @@ fn short_source(url: &str) -> &'static str {
     }
 }
 
+/// Explain, once, why the browser cookies were not used.
+///
+/// yt-dlp already retried without them; the point of the message is that
+/// Chrome and Edge on Windows cannot be read at all (App-Bound Encryption),
+/// which is not something a retry or an update of yt-dlp will fix.
+fn flush_cookie_problem(ytdlp: &YtDlp, tx: &Sender<Event>, notify: &impl Fn()) {
+    let Some(problem) = ytdlp.take_cookie_problem() else {
+        return;
+    };
+    let lower = problem.to_lowercase();
+    let reason = if lower.contains("dpapi") || lower.contains("decrypt") {
+        "Chrome/Edge no Windows cifram os cookies com App-Bound Encryption e o yt-dlp não \
+         consegue decifrá-los (yt-dlp#10927)."
+    } else if lower.contains("could not copy") || lower.contains("unable to open cookie") {
+        "o navegador está aberto e travou o banco de cookies."
+    } else if lower.contains("could not find") || lower.contains("cookies database") {
+        "não achei o banco de cookies desse navegador."
+    } else {
+        "o yt-dlp não conseguiu ler os cookies."
+    };
+    emit(
+        tx,
+        notify,
+        Level::Warn,
+        format!(
+            "Sem cookies: {reason} Seguindo sem sessão; se o YouTube pedir login, use Firefox \
+             (instalado e logado) ou um cookies.txt."
+        ),
+    );
+}
+
 fn download_direct_audio(
     ytdlp: &YtDlp,
-    url: &str,
-    out_dir: &Path,
+    request: &Request,
     tx: &Sender<Event>,
     notify: &impl Fn(),
 ) -> Result<Outcome, String> {
@@ -320,10 +416,12 @@ fn download_direct_audio(
     std::fs::create_dir_all(&temp).map_err(|err| format!("{err}"))?;
 
     let template = temp.join("audio.%(ext)s");
-    ytdlp.download_audio(url, &template)?;
+    let attempt = ytdlp.download_audio(&request.url, &template);
+    flush_cookie_problem(ytdlp, tx, notify);
+    attempt?;
     let produced = newest_file(&temp, &["mp3"])
         .ok_or_else(|| "o download terminou sem gerar um MP3".to_string())?;
-    let destination = out_dir.join(format!("{}.mp3", sanitize("audio")));
+    let destination = request.out_dir.join(format!("{}.mp3", sanitize("audio")));
     move_file(&produced, &destination)?;
     let _ = std::fs::remove_dir_all(&temp);
     let _ = tx.send(Event::Progress(1.0));
@@ -331,13 +429,13 @@ fn download_direct_audio(
     Ok(Outcome {
         files: vec![destination],
         failures: Vec::new(),
+        cancelled: false,
     })
 }
 
 fn download_direct_video(
     ytdlp: &YtDlp,
-    url: &str,
-    out_dir: &Path,
+    request: &Request,
     tx: &Sender<Event>,
     notify: &impl Fn(),
 ) -> Result<Outcome, String> {
@@ -346,7 +444,9 @@ fn download_direct_video(
     std::fs::create_dir_all(&temp).map_err(|err| format!("{err}"))?;
 
     let template = temp.join("video.%(ext)s");
-    ytdlp.download_video(url, &template)?;
+    let attempt = ytdlp.download_video(&request.url, &template);
+    flush_cookie_problem(ytdlp, tx, notify);
+    attempt?;
     let produced = newest_file(&temp, &["mp4", "mkv", "webm"])
         .ok_or_else(|| "o download terminou sem gerar um vídeo".to_string())?;
     let extension = produced
@@ -354,7 +454,9 @@ fn download_direct_video(
         .and_then(|value| value.to_str())
         .unwrap_or("mp4")
         .to_string();
-    let destination = out_dir.join(format!("{}.{extension}", sanitize("video")));
+    let destination = request
+        .out_dir
+        .join(format!("{}.{extension}", sanitize("video")));
     move_file(&produced, &destination)?;
     let _ = std::fs::remove_dir_all(&temp);
     let _ = tx.send(Event::Progress(1.0));
@@ -362,5 +464,6 @@ fn download_direct_video(
     Ok(Outcome {
         files: vec![destination],
         failures: Vec::new(),
+        cancelled: false,
     })
 }

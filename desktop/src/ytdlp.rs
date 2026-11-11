@@ -34,8 +34,12 @@ pub struct YtDlp {
     ffmpeg: Option<PathBuf>,
     /// Browser whose cookies yt-dlp should read, e.g. "firefox".
     cookies: Option<String>,
+    /// Netscape `cookies.txt`, for browsers yt-dlp cannot read directly.
+    cookies_file: Option<PathBuf>,
     /// Set when the cookies could not be read and the app went on without them.
     cookie_problem: Cell<Option<String>>,
+    /// Once set, cookies are not passed at all for the rest of the run.
+    cookies_broken: Cell<bool>,
 }
 
 /// Errors that mean "these cookies are unusable", not "this track failed".
@@ -50,6 +54,8 @@ pub fn is_cookie_error(message: &str) -> bool {
         || (lower.contains("could not find") && lower.contains("cookie"))
         || lower.contains("cookies-from-browser")
         || lower.contains("failed to decrypt")
+        || lower.contains("could not copy")
+        || lower.contains("unable to open cookie")
 }
 
 const NOISE_WORDS: &[&str] = &[
@@ -73,12 +79,19 @@ const NOISE_WORDS: &[&str] = &[
 ];
 
 impl YtDlp {
-    pub fn new(exe: PathBuf, ffmpeg: Option<PathBuf>, cookies: Option<String>) -> Self {
+    pub fn new(
+        exe: PathBuf,
+        ffmpeg: Option<PathBuf>,
+        cookies: Option<String>,
+        cookies_file: Option<PathBuf>,
+    ) -> Self {
         Self {
             exe,
             ffmpeg,
             cookies: cookies.filter(|value| !value.trim().is_empty()),
+            cookies_file,
             cookie_problem: Cell::new(None),
+            cookies_broken: Cell::new(false),
         }
     }
 
@@ -87,39 +100,54 @@ impl YtDlp {
         self.cookie_problem.take()
     }
 
-    /// Run `attempt`, retrying once without cookies if yt-dlp cannot read them.
+    fn has_cookies(&self) -> bool {
+        self.cookies.is_some() || self.cookies_file.is_some()
+    }
+
+    /// Run `attempt`, retrying without cookies when yt-dlp cannot read them.
+    ///
+    /// The retry is remembered for the rest of the run: a broken cookie store
+    /// would otherwise make every search and download pay for the same failing
+    /// attempt and repeat the same warning.
     fn with_cookie_fallback<T>(
         &self,
-        attempt: impl Fn(Option<&str>) -> Result<T, String>,
+        attempt: impl Fn() -> Result<T, String>,
     ) -> Result<T, String> {
-        let chosen = self.cookies.as_deref();
-        match attempt(chosen) {
-            Err(err) if chosen.is_some() && is_cookie_error(&err) => {
+        match attempt() {
+            Err(err)
+                if self.has_cookies() && !self.cookies_broken.get() && is_cookie_error(&err) =>
+            {
+                self.cookies_broken.set(true);
                 self.cookie_problem.set(Some(err));
-                attempt(None)
+                attempt()
             }
             other => other,
         }
     }
 
-    fn command(&self, cookies: Option<&str>) -> std::process::Command {
+    fn command(&self) -> std::process::Command {
         let mut cmd = deps::command(&self.exe);
         cmd.arg("--no-playlist")
             .arg("--no-color")
             .arg("--no-warnings");
-        if let Some(browser) = cookies.filter(|value| !value.is_empty()) {
+        if self.cookies_broken.get() {
+            return cmd;
+        }
+        if let Some(browser) = self.cookies.as_deref() {
             cmd.arg("--cookies-from-browser").arg(browser);
+        } else if let Some(file) = &self.cookies_file {
+            cmd.arg("--cookies").arg(file);
         }
         cmd
     }
 
     pub fn search(&self, query: &str) -> Result<Vec<Entry>, String> {
-        self.with_cookie_fallback(|cookies| self.search_with(query, cookies))
+        self.with_cookie_fallback(|| self.search_once(query))
     }
 
-    fn search_with(&self, query: &str, cookies: Option<&str>) -> Result<Vec<Entry>, String> {
+    fn search_once(&self, query: &str) -> Result<Vec<Entry>, String> {
         let out = self
-            .command(cookies)
+            .command()
             .arg("--flat-playlist")
             .arg("-J")
             .arg(query)
@@ -142,16 +170,11 @@ impl YtDlp {
     }
 
     pub fn download_audio(&self, media_url: &str, output: &Path) -> Result<(), String> {
-        self.with_cookie_fallback(|cookies| self.download_audio_with(media_url, output, cookies))
+        self.with_cookie_fallback(|| self.download_audio_once(media_url, output))
     }
 
-    fn download_audio_with(
-        &self,
-        media_url: &str,
-        output: &Path,
-        cookies: Option<&str>,
-    ) -> Result<(), String> {
-        let mut cmd = self.command(cookies);
+    fn download_audio_once(&self, media_url: &str, output: &Path) -> Result<(), String> {
+        let mut cmd = self.command();
         cmd.args([
             "-x",
             "--audio-format",
@@ -169,16 +192,11 @@ impl YtDlp {
     }
 
     pub fn download_video(&self, media_url: &str, output: &Path) -> Result<(), String> {
-        self.with_cookie_fallback(|cookies| self.download_video_with(media_url, output, cookies))
+        self.with_cookie_fallback(|| self.download_video_once(media_url, output))
     }
 
-    fn download_video_with(
-        &self,
-        media_url: &str,
-        output: &Path,
-        cookies: Option<&str>,
-    ) -> Result<(), String> {
-        let mut cmd = self.command(cookies);
+    fn download_video_once(&self, media_url: &str, output: &Path) -> Result<(), String> {
+        let mut cmd = self.command();
         cmd.args([
             "-f",
             "bestvideo+bestaudio/best",

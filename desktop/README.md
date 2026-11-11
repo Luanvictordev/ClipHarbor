@@ -33,7 +33,7 @@ The app is a native UI (egui) around the same ideas as the web version:
 | Spotify metadata | The public embed payload of the track/album/playlist (name, artists, duration, cover, track list). No API key, no account. |
 | Audio/video download | `yt-dlp`, which the app downloads on first use into `%LOCALAPPDATA%\ClipHarbor\bin` together with `ffmpeg`, so the exe stays small and the extractor stays updatable. |
 | Matching | Search hits are ranked by duration and title tokens; 30-second previews, sped-up/slowed/remix/cover versions are rejected. |
-| Tags | The MP3 gets title/artist/album from Spotify plus the 640×640 cover artwork. |
+| Tags | The MP3 gets title/artist/album from Spotify plus the 640×640 cover artwork, written as ID3v2.3 so Windows Explorer shows the picture. |
 
 Rust has no maintained YouTube extractor, so the actual extraction is yt-dlp.
 The native part owns everything else: the UI, cookie selection, Spotify
@@ -48,9 +48,18 @@ Encryption, which yt-dlp cannot decrypt.
 
 Only browsers with a profile on this machine are listed, and if the cookies
 still cannot be read (browser closed while its database is locked, empty
-profile, undecryptable store) the app says so and continues without cookies
-instead of failing every track. Firefox installed from the Microsoft Store is
-detected too; for other portable installs, pick another browser or `nenhum`.
+profile, undecryptable store) the app says so once and continues without
+cookies instead of failing every track. Firefox installed from the Microsoft
+Store is detected too; for other portable installs, pick another browser or
+`nenhum`.
+
+When Chrome or Edge on Windows reports `Failed to decrypt with DPAPI`, that is
+App-Bound Encryption (yt-dlp issue #10927, still open upstream): no retry or
+update fixes it. Two paths work:
+
+- **Firefox** installed and signed in to YouTube — the app reads it directly.
+- A **`cookies.txt`** in Netscape format, exported once from any browser with a
+  cookies extension; paste its path in the `cookies.txt` field.
 
 ## Limitations
 
@@ -76,4 +85,5 @@ cargo run -- --cli "https://open.spotify.com/track/5XeFesFbtLpXzIVDNQP22n" /tmp/
 ```
 
 Environment overrides: `CLIPHARBOR_YTDLP`, `CLIPHARBOR_FFMPEG`,
-`CLIPHARBOR_BIN_DIR`, `CLIPHARBOR_COOKIES` (CLI only).
+`CLIPHARBOR_BIN_DIR`, `CLIPHARBOR_COOKIES` and `CLIPHARBOR_COOKIES_FILE`
+(CLI only).

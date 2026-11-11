@@ -64,7 +64,8 @@ pub fn link_ref(url: &str) -> Result<(String, String), String> {
 pub fn fetch(url: &str) -> Result<Entity, String> {
     let (kind, id) = link_ref(url)?;
     let page = crate::deps::curl_text(&EMBED_PAGE.replace("{kind}", &kind).replace("{id}", &id))?;
-    let payload = next_data(&page).ok_or_else(|| "O Spotify não devolveu os metadados deste link.".to_string())?;
+    let payload = next_data(&page)
+        .ok_or_else(|| "O Spotify não devolveu os metadados deste link.".to_string())?;
 
     let entity = payload
         .pointer("/props/pageProps/state/data/entity")

@@ -7,12 +7,17 @@ mod deps;
 mod job;
 mod spotify;
 mod tags;
+mod theme;
 mod ytdlp;
 
 use std::path::PathBuf;
-use std::sync::mpsc::{channel, Receiver, Sender};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{channel, Receiver};
+use std::sync::Arc;
 
-use job::{Event, Format};
+use egui::{Align, Layout, RichText};
+
+use job::{Event, Format, Level, Request};
 
 fn default_folder() -> String {
     let base = std::env::var("USERPROFILE")
@@ -49,15 +54,19 @@ fn main() -> eframe::Result<()> {
 
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([780.0, 620.0])
-            .with_min_inner_size([560.0, 420.0]),
+            .with_inner_size([880.0, 700.0])
+            .with_min_inner_size([640.0, 520.0])
+            .with_title("ClipHarbor"),
         ..Default::default()
     };
 
     eframe::run_native(
         "ClipHarbor",
         options,
-        Box::new(|_cc| Ok(Box::new(App::new()))),
+        Box::new(|cc| {
+            theme::apply(&cc.egui_ctx);
+            Ok(Box::new(App::new()))
+        }),
     )
 }
 
@@ -68,13 +77,20 @@ fn run_cli(url: &str, folder: &str) -> eframe::Result<()> {
     }
 
     let (tx, rx) = channel();
-    let cookies = std::env::var("CLIPHARBOR_COOKIES").ok();
+    let request = Request {
+        url: url.to_string(),
+        format: Format::Audio,
+        browser: std::env::var("CLIPHARBOR_COOKIES").ok(),
+        cookies_file: std::env::var("CLIPHARBOR_COOKIES_FILE")
+            .ok()
+            .map(PathBuf::from),
+        out_dir: PathBuf::from(folder),
+    };
+    let cancel = Arc::new(AtomicBool::new(false));
     {
-        let url = url.to_string();
-        let folder = PathBuf::from(folder);
         let tx = tx.clone();
         std::thread::spawn(move || {
-            job::run(url, Format::Audio, cookies, folder, tx, || {});
+            job::run(request, cancel, tx, || {});
         });
     }
 
@@ -82,7 +98,12 @@ fn run_cli(url: &str, folder: &str) -> eframe::Result<()> {
     let mut files = 0;
     while let Ok(event) = rx.recv() {
         match event {
-            Event::Log(line) => println!("{line}"),
+            Event::Log(level, line) => println!("{}{line}", prefix(level)),
+            Event::Track {
+                index,
+                total,
+                title,
+            } => println!("[{index}/{total}] {title}"),
             Event::Progress(value) => println!("progresso: {:.0}%", value * 100.0),
             Event::Finished(outcome) => {
                 files = outcome.files.len();
@@ -107,73 +128,123 @@ fn run_cli(url: &str, folder: &str) -> eframe::Result<()> {
     std::process::exit(if failed || files == 0 { 1 } else { 0 });
 }
 
+fn prefix(level: Level) -> &'static str {
+    match level {
+        Level::Info => "",
+        Level::Ok => "",
+        Level::Warn => "aviso: ",
+        Level::Error => "erro: ",
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Idle,
+    Running,
+    Stopping,
+    Finished,
+    Failed,
+}
+
 struct App {
     url: String,
     folder: String,
-    cookies: String,
-    /// Browsers with a profile here; offering a missing one breaks every track.
     browsers: Vec<&'static str>,
+    browser: String,
+    cookies_file: String,
     format: Format,
-    log_lines: Vec<String>,
+    log: Vec<(Level, String)>,
     receiver: Option<Receiver<Event>>,
-    sender: Option<Sender<Event>>,
-    running: bool,
+    phase: Phase,
     progress: f32,
+    track: Option<(usize, usize, String)>,
     summary: String,
+    files: usize,
+    failures: usize,
+    cancel: Arc<AtomicBool>,
 }
 
 impl App {
     fn new() -> Self {
         let browsers = deps::installed_browsers();
-        let cookies = browsers
+        let browser = browsers
             .first()
             .map(|name| name.to_string())
             .unwrap_or_else(|| "nenhum".to_string());
         Self {
             url: String::new(),
             folder: default_folder(),
-            cookies,
             browsers,
+            browser,
+            cookies_file: String::new(),
             format: Format::Audio,
-            log_lines: Vec::new(),
+            log: Vec::new(),
             receiver: None,
-            sender: None,
-            running: false,
+            phase: Phase::Idle,
             progress: 0.0,
+            track: None,
             summary: String::new(),
+            files: 0,
+            failures: 0,
+            cancel: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    fn push(&mut self, level: Level, line: impl Into<String>) {
+        self.log.push((level, line.into()));
+        if self.log.len() > 500 {
+            self.log.remove(0);
         }
     }
 
     fn start(&mut self, ctx: &egui::Context) {
+        if self.phase == Phase::Running || self.phase == Phase::Stopping {
+            return;
+        }
         let url = self.url.trim().to_string();
         if url.is_empty() {
-            self.push_log("Cole um link do Spotify, YouTube ou outro site.");
+            self.push(
+                Level::Warn,
+                "Cole um link do Spotify, YouTube ou outro site.",
+            );
             return;
         }
 
+        let cookies_file = self.cookies_file.trim().to_string();
+        let request = Request {
+            url,
+            format: self.format,
+            browser: Some(self.browser.clone()),
+            cookies_file: if cookies_file.is_empty() {
+                None
+            } else {
+                Some(PathBuf::from(cookies_file))
+            },
+            out_dir: PathBuf::from(self.folder.trim()),
+        };
+
         let (tx, rx) = channel();
         self.receiver = Some(rx);
-        self.sender = Some(tx.clone());
-        self.running = true;
+        self.phase = Phase::Running;
         self.progress = 0.0;
+        self.track = None;
         self.summary.clear();
+        self.files = 0;
+        self.failures = 0;
+        self.cancel = Arc::new(AtomicBool::new(false));
 
-        let cookies = Some(self.cookies.clone()).filter(|value| value != "nenhum");
-        let folder = PathBuf::from(self.folder.trim());
-        let format = self.format;
+        let cancel = self.cancel.clone();
         let notify_ctx = ctx.clone();
         std::thread::spawn(move || {
-            job::run(url, format, cookies, folder, tx, move || {
+            job::run(request, cancel, tx, move || {
                 notify_ctx.request_repaint();
             });
         });
     }
 
-    fn push_log(&mut self, line: impl Into<String>) {
-        self.log_lines.push(line.into());
-        if self.log_lines.len() > 400 {
-            self.log_lines.remove(0);
-        }
+    fn stop(&mut self) {
+        self.cancel.store(true, Ordering::Relaxed);
+        self.phase = Phase::Stopping;
     }
 
     fn poll(&mut self) {
@@ -186,21 +257,305 @@ impl App {
 
         for event in events {
             match event {
-                Event::Log(line) => self.push_log(line),
+                Event::Log(level, line) => self.push(level, line),
+                Event::Track {
+                    index,
+                    total,
+                    title,
+                } => self.track = Some((index, total, title)),
                 Event::Progress(value) => self.progress = value,
                 Event::Finished(outcome) => {
-                    self.running = false;
-                    self.summary = format!(
-                        "{} arquivo(s) salvo(s), {} falha(s).",
-                        outcome.files.len(),
-                        outcome.failures.len()
-                    );
+                    self.phase = if outcome.cancelled {
+                        Phase::Idle
+                    } else if outcome.files.is_empty() {
+                        Phase::Failed
+                    } else {
+                        Phase::Finished
+                    };
+                    self.files = outcome.files.len();
+                    self.failures = outcome.failures.len();
+                    self.summary = if outcome.cancelled {
+                        format!("Interrompido: {} arquivo(s) salvo(s).", outcome.files.len())
+                    } else {
+                        format!(
+                            "{} arquivo(s) salvo(s), {} falha(s).",
+                            outcome.files.len(),
+                            outcome.failures.len()
+                        )
+                    };
+                    self.receiver = None;
                 }
                 Event::Failed(err) => {
-                    self.running = false;
-                    self.summary = format!("Falhou: {err}");
+                    self.phase = Phase::Failed;
+                    self.summary = err.clone();
+                    self.push(Level::Error, err);
+                    self.receiver = None;
                 }
             }
+        }
+    }
+
+    fn status(&self) -> (&'static str, egui::Color32) {
+        match self.phase {
+            Phase::Idle => ("Pronto", theme::MUTED),
+            Phase::Running => ("Baixando", theme::ACCENT_HOVER),
+            Phase::Stopping => ("Parando", theme::WARN),
+            Phase::Finished => ("Concluído", theme::OK),
+            Phase::Failed => ("Falhou", theme::ERR),
+        }
+    }
+
+    fn header(&self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.vertical(|ui| {
+                ui.label(
+                    RichText::new("ClipHarbor")
+                        .size(21.0)
+                        .strong()
+                        .color(theme::TEXT),
+                );
+                theme::muted(ui, "Áudio do Spotify, vídeos e links, neste computador.");
+            });
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (text, color) = self.status();
+                theme::pill(ui, text, color);
+                theme::label(ui, "v0.1", theme::FAINT, 11.5);
+            });
+        });
+    }
+
+    fn form(&mut self, ui: &mut egui::Ui) {
+        let mut start = false;
+
+        theme::card(ui, |ui| {
+            theme::section(ui, "Link");
+            egui::Frame::none()
+                .fill(theme::SURFACE_2)
+                .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                .rounding(egui::Rounding::same(9.0))
+                .inner_margin(egui::Margin::symmetric(4.0, 3.0))
+                .show(ui, |ui| {
+                    ui.add_sized(
+                        [ui.available_width(), 30.0],
+                        egui::TextEdit::singleline(&mut self.url)
+                            .hint_text(
+                                RichText::new(
+                                    "https://open.spotify.com/track/…  ou  https://youtu.be/…",
+                                )
+                                .color(theme::FAINT),
+                            )
+                            .frame(false)
+                            .margin(egui::Margin::symmetric(6.0, 6.0))
+                            .font(egui::FontId::new(14.0, egui::FontFamily::Proportional)),
+                    );
+                });
+
+            ui.add_space(10.0);
+            theme::section(ui, "Salvar em");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if theme::button(ui, "Abrir pasta", theme::Kind::Ghost).clicked() {
+                    open_folder(self.folder.trim());
+                }
+                ui.add_sized(
+                    [ui.available_width(), 32.0],
+                    egui::TextEdit::singleline(&mut self.folder)
+                        .margin(egui::Margin::symmetric(10.0, 7.0))
+                        .font(egui::FontId::new(14.0, egui::FontFamily::Proportional)),
+                );
+            });
+
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                theme::label(ui, "Formato", theme::FAINT, 10.5);
+                let options = [
+                    ("MP3", self.format == Format::Audio),
+                    ("MP4", self.format == Format::Video),
+                ];
+                if let Some(choice) = theme::segmented(ui, &options) {
+                    self.format = if choice == 0 {
+                        Format::Audio
+                    } else {
+                        Format::Video
+                    };
+                }
+
+                ui.add_space(12.0);
+                theme::label(ui, "Cookies", theme::FAINT, 10.5);
+                egui::ComboBox::from_id_salt("cookies")
+                    .width(120.0)
+                    .selected_text(&self.browser)
+                    .show_ui(ui, |ui| {
+                        for option in &self.browsers {
+                            ui.selectable_value(&mut self.browser, option.to_string(), *option);
+                        }
+                        ui.selectable_value(&mut self.browser, "nenhum".to_string(), "nenhum");
+                    });
+            });
+
+            if self.browsers.is_empty() {
+                theme::label(
+                    ui,
+                    "Nenhum navegador com perfil encontrado: os downloads vão sem cookies.",
+                    theme::WARN,
+                    11.5,
+                );
+            } else if cfg!(windows)
+                && matches!(
+                    self.browser.as_str(),
+                    "chrome" | "edge" | "brave" | "chromium" | "vivaldi" | "opera"
+                )
+            {
+                theme::label(
+                    ui,
+                    "Chrome/Edge no Windows protegem os cookies com App-Bound Encryption e o yt-dlp não consegue lê-los. Prefira Firefox ou um cookies.txt.",
+                    theme::WARN,
+                    11.5,
+                );
+            }
+
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                theme::label(ui, "cookies.txt", theme::FAINT, 10.5);
+                ui.add_sized(
+                    [ui.available_width(), 30.0],
+                    egui::TextEdit::singleline(&mut self.cookies_file)
+                        .hint_text(
+                            RichText::new("opcional: caminho do cookies.txt (formato Netscape)")
+                                .color(theme::FAINT),
+                        )
+                        .margin(egui::Margin::symmetric(10.0, 6.0))
+                        .font(egui::FontId::new(12.5, egui::FontFamily::Proportional)),
+                );
+            });
+
+            ui.add_space(12.0);
+            let label = match self.phase {
+                Phase::Running => "Parar depois desta faixa",
+                Phase::Stopping => "Parando…",
+                _ => "Baixar",
+            };
+            let kind = match self.phase {
+                Phase::Running => theme::Kind::Danger,
+                Phase::Stopping => theme::Kind::Ghost,
+                _ => theme::Kind::Primary,
+            };
+            let enabled = self.phase != Phase::Stopping;
+            let width = ui.available_width();
+            ui.add_enabled_ui(enabled, |ui| {
+                if theme::button_sized(ui, label, kind, Some(width)).clicked() {
+                    match self.phase {
+                        Phase::Running => self.stop(),
+                        _ => start = true,
+                    }
+                }
+            });
+        });
+
+        if start {
+            self.start(ui.ctx());
+        }
+    }
+
+    fn progress_card(&self, ui: &mut egui::Ui) {
+        theme::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                theme::label(ui, "Progresso", theme::TEXT, 13.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    theme::label(
+                        ui,
+                        &format!("{:.0}%", self.progress * 100.0),
+                        theme::MUTED,
+                        12.0,
+                    );
+                });
+            });
+            ui.add_space(4.0);
+            theme::progress(ui, self.progress);
+            ui.add_space(8.0);
+
+            let line = match &self.track {
+                Some((index, total, title)) => format!("Faixa {index}/{total} · {title}"),
+                None if self.phase == Phase::Running => "Preparando…".to_string(),
+                None => "Nada na fila.".to_string(),
+            };
+            theme::label(ui, &line, theme::MUTED, 12.5);
+
+            if !self.summary.is_empty() {
+                ui.add_space(6.0);
+                let color = match self.phase {
+                    Phase::Failed => theme::ERR,
+                    Phase::Finished => theme::OK,
+                    _ => theme::MUTED,
+                };
+                theme::label(ui, &self.summary, color, 12.5);
+            }
+
+            if self.files > 0 || self.failures > 0 {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    theme::label(ui, &format!("{} salvos", self.files), theme::OK, 12.0);
+                    theme::label(ui, "·", theme::FAINT, 12.0);
+                    theme::label(
+                        ui,
+                        &format!("{} falhas", self.failures),
+                        if self.failures > 0 {
+                            theme::ERR
+                        } else {
+                            theme::MUTED
+                        },
+                        12.0,
+                    );
+                });
+            }
+        });
+    }
+
+    fn log_card(&mut self, ui: &mut egui::Ui) {
+        let mut clear = false;
+        theme::card(ui, |ui| {
+            ui.horizontal(|ui| {
+                theme::label(ui, "Registro", theme::TEXT, 13.0);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if theme::button(ui, "Limpar", theme::Kind::Ghost).clicked() {
+                        clear = true;
+                    }
+                });
+            });
+            ui.add_space(4.0);
+
+            egui::Frame::none()
+                .fill(theme::BG)
+                .stroke(egui::Stroke::new(1.0_f32, theme::BORDER))
+                .rounding(egui::Rounding::same(9.0))
+                .inner_margin(egui::Margin::symmetric(12.0, 10.0))
+                .show(ui, |ui| {
+                    egui::ScrollArea::vertical()
+                        .max_height(190.0)
+                        .auto_shrink([false, false])
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            if self.log.is_empty() {
+                                theme::label(
+                                    ui,
+                                    "Os detalhes do download aparecem aqui.",
+                                    theme::FAINT,
+                                    12.0,
+                                );
+                            }
+                            for (level, line) in &self.log {
+                                let color = match level {
+                                    Level::Info => theme::MUTED,
+                                    Level::Ok => theme::OK,
+                                    Level::Warn => theme::WARN,
+                                    Level::Error => theme::ERR,
+                                };
+                                ui.label(RichText::new(line).monospace().size(12.0).color(color));
+                            }
+                        });
+                });
+        });
+        if clear {
+            self.log.clear();
         }
     }
 }
@@ -209,83 +564,20 @@ impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll();
 
-        egui::CentralPanel::default().show(ctx, |ui| {
-            ui.heading("ClipHarbor");
-            ui.label("Baixa áudio do Spotify, vídeos e outros links neste computador.");
-            ui.add_space(8.0);
-
-            ui.horizontal(|ui| {
-                ui.label("Link:");
-                ui.add_sized(
-                    [ui.available_width() - 10.0, 24.0],
-                    egui::TextEdit::singleline(&mut self.url)
-                        .hint_text("https://open.spotify.com/track/... ou https://youtu.be/..."),
-                );
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::none()
+                    .fill(theme::BG)
+                    .inner_margin(egui::Margin::symmetric(22.0, 20.0)),
+            )
+            .show(ctx, |ui| {
+                self.header(ui);
+                ui.add_space(14.0);
+                self.form(ui);
+                ui.add_space(10.0);
+                self.progress_card(ui);
+                ui.add_space(10.0);
+                self.log_card(ui);
             });
-
-            ui.horizontal(|ui| {
-                ui.label("Pasta:");
-                ui.add_sized(
-                    [(ui.available_width() - 190.0).max(160.0), 24.0],
-                    egui::TextEdit::singleline(&mut self.folder),
-                );
-                if ui.button("Abrir pasta").clicked() {
-                    open_folder(&self.folder);
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Cookies do navegador:");
-                egui::ComboBox::from_id_salt("cookies")
-                    .selected_text(&self.cookies)
-                    .show_ui(ui, |ui| {
-                        for option in &self.browsers {
-                            ui.selectable_value(&mut self.cookies, option.to_string(), *option);
-                        }
-                        ui.selectable_value(&mut self.cookies, "nenhum".to_string(), "nenhum");
-                    });
-                if self.browsers.is_empty() {
-                    ui.label("(nenhum navegador com perfil encontrado; baixando sem cookies)");
-                } else {
-                    ui.label("(escolha o navegador logado no YouTube)");
-                }
-            });
-
-            ui.horizontal(|ui| {
-                ui.label("Formato:");
-                ui.selectable_value(&mut self.format, Format::Audio, "🎵 MP3");
-                ui.selectable_value(&mut self.format, Format::Video, "🎬 MP4");
-                ui.separator();
-                let button = egui::Button::new(if self.running {
-                    "Baixando..."
-                } else {
-                    "Baixar"
-                });
-                if ui.add_enabled(!self.running, button).clicked() {
-                    self.start(ctx);
-                    self.progress = 0.0;
-                }
-            });
-
-            if self.running || self.progress > 0.0 {
-                ui.add(egui::ProgressBar::new(self.progress).show_percentage());
-            }
-
-            if !self.summary.is_empty() {
-                ui.add_space(4.0);
-                ui.label(&self.summary);
-            }
-
-            ui.add_space(6.0);
-            ui.separator();
-            egui::ScrollArea::vertical()
-                .auto_shrink([false, false])
-                .stick_to_bottom(true)
-                .show(ui, |ui| {
-                    for line in &self.log_lines {
-                        ui.label(egui::RichText::new(line).monospace().size(12.0));
-                    }
-                });
-        });
     }
 }
